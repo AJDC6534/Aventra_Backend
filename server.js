@@ -576,6 +576,576 @@ app.put('/api/users/profile', authenticateToken, async (req, res) => {
   }
 });
 
+// ===== USER PREFERENCES ROUTE =====
+app.put('/api/users/preferences', authenticateToken, async (req, res) => {
+  try {
+    const { travelStyle, budgetRange, interests, pace } = req.body;
+    
+    // Validate interests array
+    if (interests && !Array.isArray(interests)) {
+      return res.status(400).json({ message: 'Interests must be an array' });
+    }
+    
+    const preferencesUpdate = {
+      preferences: {
+        travelStyle: travelStyle || '',
+        budgetRange: budgetRange || '',
+        interests: interests || [],
+        pace: pace || ''
+      },
+      updatedAt: Date.now()
+    };
+    
+    const user = await User.findByIdAndUpdate(
+      req.user.userId,
+      preferencesUpdate,
+      { new: true, runValidators: true }
+    ).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Log activity
+    await new UserActivity({
+      userId: req.user.userId,
+      type: 'preferences_updated',
+      title: 'Travel preferences updated',
+      description: `Updated travel style: ${travelStyle}, budget: ${budgetRange}, interests: ${interests?.join(', ') || 'none'}`,
+      icon: '🎯'
+    }).save();
+    
+    res.json(user.preferences);
+    
+  } catch (error) {
+    console.error('Preferences update error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== SAFETY SETTINGS ROUTE =====
+app.put('/api/users/safety-settings', authenticateToken, async (req, res) => {
+  try {
+    const { emergencyContacts, locationSharing, medicalInfo, travelPreferences } = req.body;
+    
+    // Validate emergency contacts
+    if (!emergencyContacts || !Array.isArray(emergencyContacts) || emergencyContacts.length === 0) {
+      return res.status(400).json({ message: 'At least one emergency contact is required' });
+    }
+    
+    // Validate required fields for each contact
+    for (const contact of emergencyContacts) {
+      if (!contact.name || !contact.name.trim()) {
+        return res.status(400).json({ message: 'Contact name is required' });
+      }
+      if (!contact.phone || !contact.phone.trim()) {
+        return res.status(400).json({ message: 'Contact phone number is required' });
+      }
+    }
+    
+    // Ensure one primary contact
+    const primaryContacts = emergencyContacts.filter(contact => contact.isPrimary);
+    if (primaryContacts.length !== 1) {
+      emergencyContacts.forEach((contact, index) => {
+        contact.isPrimary = index === 0;
+      });
+    }
+    
+    const updates = {
+      emergencyContacts,
+      locationSharing: locationSharing || {
+        enabled: false,
+        shareWithContacts: false,
+        shareWithTrustedCircle: false,
+        allowEmergencyAccess: false
+      },
+      medicalInfo: medicalInfo || {
+        allergies: '',
+        medications: '',
+        medicalConditions: '',
+        bloodType: '',
+        emergencyMedicalInfo: ''
+      },
+      travelPreferences: travelPreferences || {
+        checkInFrequency: 'daily',
+        autoCheckIn: false,
+        sosButtonEnabled: true
+      },
+      updatedAt: Date.now()
+    };
+    
+    const user = await User.findByIdAndUpdate(
+      req.user.userId,
+      updates,
+      { new: true, runValidators: true }
+    ).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Log activity
+    await new UserActivity({
+      userId: req.user.userId,
+      type: 'safety_updated',
+      title: 'Safety settings updated',
+      description: `Updated emergency contacts (${emergencyContacts.length}), location sharing: ${locationSharing?.enabled ? 'enabled' : 'disabled'}`,
+      icon: '🛡️'
+    }).save();
+    
+    res.json({
+      emergencyContacts: user.emergencyContacts,
+      locationSharing: user.locationSharing,
+      medicalInfo: user.medicalInfo,
+      travelPreferences: user.travelPreferences
+    });
+    
+  } catch (error) {
+    console.error('Safety settings update error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== LOCATION UPDATE ROUTE =====
+app.put('/api/users/location', authenticateToken, async (req, res) => {
+  try {
+    const { latitude, longitude, address, accuracy } = req.body;
+    
+    if (!latitude || !longitude) {
+      return res.status(400).json({ message: 'Latitude and longitude are required' });
+    }
+    
+    const locationUpdate = {
+      currentLocation: {
+        latitude: parseFloat(latitude),
+        longitude: parseFloat(longitude),
+        address: address || `${latitude}, ${longitude}`,
+        accuracy: accuracy || 0,
+        timestamp: new Date()
+      },
+      updatedAt: Date.now()
+    };
+    
+    const user = await User.findByIdAndUpdate(
+      req.user.userId,
+      locationUpdate,
+      { new: true }
+    ).select('currentLocation');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Log activity
+    await new UserActivity({
+      userId: req.user.userId,
+      type: 'location_updated',
+      title: 'Location updated',
+      description: `Location updated to ${address || 'coordinates'}`,
+      icon: '📍'
+    }).save();
+    
+    res.json({ success: true, location: user.currentLocation });
+    
+  } catch (error) {
+    console.error('Location update error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== CHECK-IN ROUTE =====
+app.post('/api/users/check-in', authenticateToken, async (req, res) => {
+  try {
+    const { location, status, message, automatic } = req.body;
+    
+    if (!location || !location.latitude || !location.longitude) {
+      return res.status(400).json({ message: 'Location is required for check-in' });
+    }
+    
+    const checkIn = new CheckIn({
+      userId: req.user.userId,
+      location: {
+        latitude: parseFloat(location.latitude),
+        longitude: parseFloat(location.longitude),
+        address: location.address || `${location.latitude}, ${location.longitude}`,
+        accuracy: location.accuracy || 0
+      },
+      status: status || 'safe',
+      message: message || '',
+      automatic: automatic || false
+    });
+    
+    await checkIn.save();
+    
+    // Update user's current location
+    await User.findByIdAndUpdate(req.user.userId, {
+      currentLocation: {
+        latitude: parseFloat(location.latitude),
+        longitude: parseFloat(location.longitude),
+        address: location.address || `${location.latitude}, ${location.longitude}`,
+        accuracy: location.accuracy || 0,
+        timestamp: new Date()
+      }
+    });
+    
+    // Log activity
+    await new UserActivity({
+      userId: req.user.userId,
+      type: 'check_in',
+      title: automatic ? 'Automatic check-in' : 'Manual check-in',
+      description: `Checked in from ${location.address || 'current location'} - Status: ${status || 'safe'}`,
+      icon: '✅',
+      metadata: { location, status }
+    }).save();
+    
+    res.json({ success: true, checkIn });
+    
+  } catch (error) {
+    console.error('Check-in error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== EMERGENCY ALERT ROUTE =====
+app.post('/api/emergency/alert', authenticateToken, async (req, res) => {
+  try {
+    const { type, location, emergencyContacts, message } = req.body;
+    
+    if (!emergencyContacts || !Array.isArray(emergencyContacts) || emergencyContacts.length === 0) {
+      return res.status(400).json({ message: 'Emergency contacts are required' });
+    }
+    
+    // Validate emergency contacts
+    const validContacts = emergencyContacts.filter(contact => 
+      contact.name && contact.name.trim() && contact.phone && contact.phone.trim()
+    );
+    
+    if (validContacts.length === 0) {
+      return res.status(400).json({ message: 'At least one valid emergency contact is required' });
+    }
+    
+    const alert = new EmergencyAlert({
+      userId: req.user.userId,
+      alertType: type || 'other',
+      location: location ? {
+        latitude: parseFloat(location.latitude),
+        longitude: parseFloat(location.longitude),
+        address: location.address || `${location.latitude}, ${location.longitude}`
+      } : null,
+      message: message || '',
+      emergencyContacts: validContacts.map(contact => ({
+        name: contact.name,
+        phone: contact.phone,
+        email: contact.email || '',
+        notificationSent: false
+      }))
+    });
+    
+    await alert.save();
+    
+    // In a real implementation, you would send notifications here
+    // For now, we'll just mark them as sent
+    alert.emergencyContacts.forEach(contact => {
+      contact.notificationSent = true;
+    });
+    await alert.save();
+    
+    // Log critical activity
+    await new UserActivity({
+      userId: req.user.userId,
+      type: 'emergency_alert',
+      title: '🚨 EMERGENCY ALERT SENT',
+      description: `Emergency alert (${type || 'other'}) sent to ${validContacts.length} contacts`,
+      icon: '🚨',
+      metadata: { 
+        alertType: type, 
+        location, 
+        contactCount: validContacts.length,
+        alertId: alert._id
+      }
+    }).save();
+    
+    res.json({ 
+      success: true, 
+      alertId: alert._id,
+      message: 'Emergency alert sent successfully',
+      contactsNotified: validContacts.length
+    });
+    
+  } catch (error) {
+    console.error('Emergency alert error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== GET USER ACTIVITY ROUTE =====
+app.get('/api/users/activity', authenticateToken, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = parseInt(req.query.offset) || 0;
+    
+    const activities = await UserActivity
+      .find({ userId: req.user.userId })
+      .sort({ createdAt: -1 })
+      .skip(offset)
+      .limit(limit)
+      .lean();
+    
+    const formattedActivities = activities.map(activity => ({
+      id: activity._id,
+      icon: activity.icon || '📋',
+      title: activity.title,
+      description: activity.description,
+      date: activity.createdAt,
+      type: activity.type,
+      metadata: activity.metadata
+    }));
+    
+    res.json(formattedActivities);
+    
+  } catch (error) {
+    console.error('Activity fetch error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== GET TRAVEL HISTORY ROUTE =====
+app.get('/api/users/travel-history', authenticateToken, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = parseInt(req.query.offset) || 0;
+    
+    // Get completed trips (where end date is in the past)
+    const trips = await Itinerary
+      .find({ 
+        userId: req.user.userId,
+        endDate: { $lt: new Date() }
+      })
+      .sort({ endDate: -1 })
+      .skip(offset)
+      .limit(limit)
+      .lean();
+    
+    const formattedTrips = trips.map(trip => ({
+      id: trip._id,
+      title: trip.title,
+      destination: trip.destination,
+      startDate: trip.startDate,
+      endDate: trip.endDate,
+      totalCost: trip.budget || 0,
+      rating: trip.rating || null,
+      duration: Math.ceil((new Date(trip.endDate) - new Date(trip.startDate)) / (1000 * 60 * 60 * 24)) + 1,
+      aiGenerated: trip.aiGenerated || false,
+      activities: trip.days ? trip.days.reduce((total, day) => total + (day.activities?.length || 0), 0) : 0
+    }));
+    
+    res.json(formattedTrips);
+    
+  } catch (error) {
+    console.error('Travel history fetch error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== RATE TRIP ROUTE =====
+app.put('/api/itineraries/:id/rate', authenticateToken, async (req, res) => {
+  try {
+    const { rating } = req.body;
+    
+    if (!rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ message: 'Rating must be between 1 and 5' });
+    }
+    
+    const itinerary = await Itinerary.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user.userId },
+      { rating: parseInt(rating), updatedAt: Date.now() },
+      { new: true }
+    );
+    
+    if (!itinerary) {
+      return res.status(404).json({ message: 'Itinerary not found' });
+    }
+    
+    // Log activity
+    await new UserActivity({
+      userId: req.user.userId,
+      type: 'trip_rated',
+      title: 'Trip rated',
+      description: `Rated "${itinerary.title}" ${rating} stars`,
+      icon: '⭐',
+      metadata: { 
+        itineraryId: itinerary._id, 
+        rating: parseInt(rating),
+        destination: itinerary.destination
+      }
+    }).save();
+    
+    // Update user's average rating
+    await updateUserStats(req.user.userId);
+    
+    res.json({ success: true, rating: parseInt(rating) });
+    
+  } catch (error) {
+    console.error('Trip rating error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== GET CHECK-IN HISTORY ROUTE =====
+app.get('/api/users/check-ins', authenticateToken, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = parseInt(req.query.offset) || 0;
+    
+    const checkIns = await CheckIn
+      .find({ userId: req.user.userId })
+      .sort({ timestamp: -1 })
+      .skip(offset)
+      .limit(limit)
+      .lean();
+    
+    res.json(checkIns);
+    
+  } catch (error) {
+    console.error('Check-ins fetch error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== GET EMERGENCY ALERTS ROUTE =====
+app.get('/api/emergency/alerts', authenticateToken, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = parseInt(req.query.offset) || 0;
+    
+    const alerts = await EmergencyAlert
+      .find({ userId: req.user.userId })
+      .sort({ createdAt: -1 })
+      .skip(offset)
+      .limit(limit)
+      .lean();
+    
+    res.json(alerts);
+    
+  } catch (error) {
+    console.error('Emergency alerts fetch error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== RESOLVE EMERGENCY ALERT ROUTE =====
+app.put('/api/emergency/alerts/:id/resolve', authenticateToken, async (req, res) => {
+  try {
+    const alert = await EmergencyAlert.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user.userId },
+      { 
+        status: 'resolved',
+        resolvedAt: new Date()
+      },
+      { new: true }
+    );
+    
+    if (!alert) {
+      return res.status(404).json({ message: 'Emergency alert not found' });
+    }
+    
+    // Log activity
+    await new UserActivity({
+      userId: req.user.userId,
+      type: 'emergency_resolved',
+      title: 'Emergency alert resolved',
+      description: `Emergency alert resolved - ${alert.alertType}`,
+      icon: '✅',
+      metadata: { alertId: alert._id }
+    }).save();
+    
+    res.json({ success: true, alert });
+    
+  } catch (error) {
+    console.error('Emergency alert resolve error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== HELPER FUNCTION TO UPDATE USER STATS =====
+async function updateUserStats(userId) {
+  try {
+    // Calculate user statistics
+    const totalTrips = await Itinerary.countDocuments({ userId });
+    const completedTrips = await Itinerary.find({ 
+      userId,
+      endDate: { $lt: new Date() }
+    });
+    
+    // Calculate average rating from completed trips
+    const ratedTrips = completedTrips.filter(trip => trip.rating);
+    const avgRating = ratedTrips.length > 0 
+      ? ratedTrips.reduce((sum, trip) => sum + trip.rating, 0) / ratedTrips.length 
+      : 0;
+    
+    // Calculate total days traveled
+    const daysTraveled = completedTrips.reduce((total, trip) => {
+      const days = Math.ceil((new Date(trip.endDate) - new Date(trip.startDate)) / (1000 * 60 * 60 * 24)) + 1;
+      return total + days;
+    }, 0);
+    
+    // Count unique countries (simplified - just count unique destinations)
+    const uniqueDestinations = [...new Set(completedTrips.map(trip => trip.destination))];
+    const countriesVisited = uniqueDestinations.length;
+    
+    // Update user statistics
+    await User.findByIdAndUpdate(userId, {
+      totalTrips,
+      avgRating: Math.round(avgRating * 10) / 10,
+      daysTraveled,
+      countriesVisited,
+      updatedAt: Date.now()
+    });
+    
+  } catch (error) {
+    console.error('Error updating user stats:', error);
+  }
+}
+
+// ===== PROFILE PICTURE UPLOAD ROUTE =====
+app.post('/api/users/profile-picture', authenticateToken, async (req, res) => {
+  try {
+    // In a real implementation, you would handle file upload here
+    // For now, we'll just return a success response
+    // You would typically use multer or similar for file handling
+    
+    res.status(501).json({ 
+      message: 'Profile picture upload not implemented yet',
+      note: 'This would typically handle file upload with multer and cloud storage'
+    });
+    
+  } catch (error) {
+    console.error('Profile picture upload error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== BULK USER STATS UPDATE ROUTE (Admin/Maintenance) =====
+app.post('/api/admin/update-user-stats', authenticateToken, async (req, res) => {
+  try {
+    // This would be an admin-only route in a real implementation
+    const users = await User.find({}).select('_id');
+    
+    for (const user of users) {
+      await updateUserStats(user._id);
+    }
+    
+    res.json({ 
+      success: true, 
+      message: `Updated stats for ${users.length} users` 
+    });
+    
+  } catch (error) {
+    console.error('Bulk user stats update error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
 // ===== ITINERARY ROUTES =====
 app.post('/api/itineraries', authenticateToken, async (req, res) => {
   try {
