@@ -356,32 +356,33 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   const budgetMultiplier = budget === 'budget' ? 0.5 : budget === 'luxury' ? 2 : 1;
   const sanitizedDays = [];
   
-  // More robust date parsing
+  // Parse the provided start date
   let startDate;
   try {
     if (startDateStr) {
       startDate = new Date(startDateStr);
-      // Check if date is valid
       if (isNaN(startDate.getTime())) {
         throw new Error('Invalid start date');
       }
     } else {
-      startDate = new Date(); // Fallback to current date
+      startDate = new Date();
     }
   } catch (error) {
     console.error('Error parsing start date:', error);
-    startDate = new Date(); // Fallback to current date
+    startDate = new Date();
   }
   
   console.log('Parsed start date:', startDate.toISOString());
   
+  // Generate the correct number of days with the correct dates
   for (let i = 0; i < expectedDays; i++) {
     const currentDate = new Date(startDate);
     currentDate.setDate(startDate.getDate() + i);
-    const dateStr = currentDate.toISOString().split('T')[0];
+    const correctDateStr = currentDate.toISOString().split('T')[0];
     
-    console.log(`Day ${i + 1} date: ${dateStr}`);
+    console.log(`Day ${i + 1} correct date: ${correctDateStr}`);
     
+    // Get AI activities for this day (if available)
     const aiDay = aiData.days[i] || { activities: [] };
     const sanitizedActivities = [];
     
@@ -414,13 +415,14 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
       });
     }
     
+    // ✅ IMPORTANT: Use the correct date, not the AI's date
     sanitizedDays.push({
-      date: dateStr,
+      date: correctDateStr, // This ensures we use YOUR dates, not AI's dates
       activities: sanitizedActivities
     });
   }
   
-  console.log('Sanitization complete, generated days:', sanitizedDays.length);
+  console.log('Sanitization complete with correct dates');
   return { days: sanitizedDays };
 }
 
@@ -1295,16 +1297,19 @@ User preferences:
 - Travel pace: ${pace}
 - Dates: ${startDate} to ${endDate}
 
+IMPORTANT: Generate activities for each day but DO NOT worry about specific dates in your response. 
+Focus on creating great activities. The dates will be handled separately.
+
 Create a JSON response with this EXACT structure. Follow these rules strictly:
 1. Cost must be a NUMBER (integer), never text
 2. Use 0 for free activities
 3. Times must be in HH:MM format
 4. All fields are required
+5. Generate exactly ${days} days worth of activities
 
 {
   "days": [
     {
-      "date": "${startDate}",
       "activities": [
         {
           "time": "09:00",
