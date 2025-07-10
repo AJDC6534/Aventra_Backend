@@ -343,7 +343,7 @@ function getDefaultActivity(interests, index) {
   return ['Explore local area', 'Visit popular attraction', 'Cultural experience', 'Local exploration'][index % 4];
 }
 
-function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interests, pace) {
+function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr) {
   console.log('🧹 Sanitizing AI itinerary data...');
   
   if (!aiData || !aiData.days || !Array.isArray(aiData.days)) {
@@ -353,7 +353,7 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   
   const budgetMultiplier = budget === 'budget' ? 0.5 : budget === 'luxury' ? 2 : 1;
   const sanitizedDays = [];
-  const startDate = new Date();
+  const startDate = new Date(startDateStr); // ✅ Use provided start date
   
   for (let i = 0; i < expectedDays; i++) {
     const currentDate = new Date(startDate);
@@ -402,17 +402,18 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   return { days: sanitizedDays };
 }
 
-function generateHighQualityMockItinerary(destination, days, interests, budget, pace) {
+function generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr) {
   console.log('🎭 Generating high-quality mock itinerary...');
   
   const budgetMultiplier = budget === 'budget' ? 0.6 : budget === 'luxury' ? 2.5 : 1;
   const activitiesPerDay = pace === 'relaxed' ? 2 : pace === 'active' ? 4 : 3;
   
   const mockDays = [];
+  const startDate = new Date(startDateStr); // ✅ Use provided start date
   
   for (let i = 0; i < days; i++) {
-    const date = new Date();
-    date.setDate(date.getDate() + i);
+    const date = new Date(startDate);
+    date.setDate(startDate.getDate() + i);
     
     const dayActivities = [];
     const startHour = 9;
@@ -1302,10 +1303,10 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
         let aiItinerary = JSON.parse(jsonStr);
         
         // Validate and sanitize the data
-        const sanitizedItinerary = sanitizeAIItinerary(aiItinerary, destination, days, budget, interests, pace);
+        const Itinerary = sanitizeAIItinerary(aiItinerary, destination, days, budget, interests, pace);
         
-        if (sanitizedItinerary && sanitizedItinerary.days && sanitizedItinerary.days.length > 0) {
-          generatedItinerary = sanitizedItinerary;
+        if (Itinerary && Itinerary.days && Itinerary.days.length > 0) {
+          generatedItinerary = Itinerary;
           useAI = true;
           provider = 'gemini';
           console.log('AI itinerary generated successfully!');
@@ -1316,7 +1317,7 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       } catch (aiError) {
         console.error('AI generation failed:', aiError.message);
         console.log('Falling back to mock generation...');
-        generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace);
+        generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDate);
         provider = 'mock';
       }
     } else {
