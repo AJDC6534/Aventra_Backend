@@ -146,7 +146,7 @@ const itinerarySchema = new mongoose.Schema({
     accommodation: String,
   },
   days: [{
-    date: Date,
+    date: String,
     activities: [{
       time: String,
       activity: String,
@@ -1346,13 +1346,13 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
         let aiItinerary = JSON.parse(jsonStr);
         
         // Validate and sanitize the data
-        const Itinerary = sanitizeAIItinerary(aiItinerary, destination, days, budget, interests, pace);
+        const sanitizedItinerary = sanitizeAIItinerary(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
         
-        if (Itinerary && Itinerary.days && Itinerary.days.length > 0) {
-          generatedItinerary = Itinerary;
-          useAI = true;
-          provider = 'gemini';
-          console.log('AI itinerary generated successfully!');
+        if (sanitizedItinerary && sanitizedItinerary.days && sanitizedItinerary.days.length > 0) {
+            generatedItinerary = sanitizedItinerary;
+            useAI = true;
+            provider = 'gemini';
+            console.log('AI itinerary generated successfully!');
         } else {
           throw new Error('Invalid itinerary structure from AI');
         }
@@ -1369,7 +1369,7 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       } else {
         console.log('Rate limited, using mock generation');
       }
-      generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace);
+      generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDate);
       provider = 'mock';
     }
     
