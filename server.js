@@ -1240,7 +1240,7 @@ app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
     
     // Check if we can use Gemini
     const hasValidKey = process.env.GEMINI_API_KEY && 
-                       process.env.GEMINI_API_KEY !== 'AIzaSyDYmQGflwt8E6cLmlXl12ATuF5At2pNlXk' &&
+                       process.env.GEMINI_API_KEY  &&
                        genAI;
     
     const withinRateLimit = rateLimiter.isAllowed(userId);
