@@ -345,6 +345,8 @@ function getDefaultActivity(interests, index) {
 
 function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr) {
   console.log('🧹 Sanitizing AI itinerary data...');
+  console.log('Start date received:', startDateStr);
+  console.log('End date received:', endDateStr);
   
   if (!aiData || !aiData.days || !Array.isArray(aiData.days)) {
     console.error('Invalid AI response structure');
@@ -353,12 +355,32 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   
   const budgetMultiplier = budget === 'budget' ? 0.5 : budget === 'luxury' ? 2 : 1;
   const sanitizedDays = [];
-  const startDate = new Date(startDateStr); // ✅ Use provided start date
+  
+  // More robust date parsing
+  let startDate;
+  try {
+    if (startDateStr) {
+      startDate = new Date(startDateStr);
+      // Check if date is valid
+      if (isNaN(startDate.getTime())) {
+        throw new Error('Invalid start date');
+      }
+    } else {
+      startDate = new Date(); // Fallback to current date
+    }
+  } catch (error) {
+    console.error('Error parsing start date:', error);
+    startDate = new Date(); // Fallback to current date
+  }
+  
+  console.log('Parsed start date:', startDate.toISOString());
   
   for (let i = 0; i < expectedDays; i++) {
     const currentDate = new Date(startDate);
     currentDate.setDate(startDate.getDate() + i);
     const dateStr = currentDate.toISOString().split('T')[0];
+    
+    console.log(`Day ${i + 1} date: ${dateStr}`);
     
     const aiDay = aiData.days[i] || { activities: [] };
     const sanitizedActivities = [];
@@ -398,21 +420,38 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
     });
   }
   
-  console.log('Sanitization complete');
+  console.log('Sanitization complete, generated days:', sanitizedDays.length);
   return { days: sanitizedDays };
 }
 
-function generateHighQualityMockItinerary(destination, days, interests, budget, pace) {
+function generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr) {
   console.log('🎭 Generating high-quality mock itinerary...');
+  console.log('Start date for mock:', startDateStr);
   
   const budgetMultiplier = budget === 'budget' ? 0.6 : budget === 'luxury' ? 2.5 : 1;
   const activitiesPerDay = pace === 'relaxed' ? 2 : pace === 'active' ? 4 : 3;
   
   const mockDays = [];
   
+  // More robust date parsing for mock generation too
+  let startDate;
+  try {
+    if (startDateStr) {
+      startDate = new Date(startDateStr);
+      if (isNaN(startDate.getTime())) {
+        throw new Error('Invalid start date for mock');
+      }
+    } else {
+      startDate = new Date();
+    }
+  } catch (error) {
+    console.error('Error parsing start date for mock:', error);
+    startDate = new Date();
+  }
+  
   for (let i = 0; i < days; i++) {
-    const date = new Date();
-    date.setDate(date.getDate() + i);
+    const date = new Date(startDate);
+    date.setDate(startDate.getDate() + i);
     
     const dayActivities = [];
     const startHour = 9;
@@ -438,50 +477,9 @@ function generateHighQualityMockItinerary(destination, days, interests, budget, 
     });
   }
   
-  console.log('Mock itinerary generated');
+  console.log('Mock itinerary generated with correct dates');
   return { days: mockDays };
 }
-
-// function generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr) {
-//   console.log('🎭 Generating high-quality mock itinerary...');
-  
-//   const budgetMultiplier = budget === 'budget' ? 0.6 : budget === 'luxury' ? 2.5 : 1;
-//   const activitiesPerDay = pace === 'relaxed' ? 2 : pace === 'active' ? 4 : 3;
-  
-//   const mockDays = [];
-//   const startDate = new Date(startDateStr); // ✅ Use provided start date
-  
-//   for (let i = 0; i < days; i++) {
-//     const date = new Date(startDate);
-//     date.setDate(startDate.getDate() + i);
-    
-//     const dayActivities = [];
-//     const startHour = 9;
-    
-//     for (let j = 0; j < activitiesPerDay; j++) {
-//       const hour = startHour + (j * 2);
-//       const activity = getDefaultActivity(interests, j);
-//       const baseCost = 20 + (j * 15);
-      
-//       dayActivities.push({
-//         time: `${hour.toString().padStart(2, '0')}:00`,
-//         activity: activity,
-//         location: `${destination} - ${['Downtown', 'Cultural District', 'Popular Area', 'Scenic Area'][j % 4]}`,
-//         duration: pace === 'relaxed' ? '3 hours' : pace === 'active' ? '1.5 hours' : '2 hours',
-//         cost: Math.round(baseCost * budgetMultiplier),
-//         notes: 'Check opening hours and enjoy!'
-//       });
-//     }
-    
-//     mockDays.push({
-//       date: date.toISOString().split('T')[0],
-//       activities: dayActivities
-//     });
-//   }
-  
-//   console.log('Mock itinerary generated');
-//   return { days: mockDays };
-// }
 
 // ===== AUTHENTICATION ROUTES =====
 app.post('/api/auth/register', async (req, res) => {
