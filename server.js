@@ -402,18 +402,17 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   return { days: sanitizedDays };
 }
 
-function generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr) {
+function generateHighQualityMockItinerary(destination, days, interests, budget, pace) {
   console.log('🎭 Generating high-quality mock itinerary...');
   
   const budgetMultiplier = budget === 'budget' ? 0.6 : budget === 'luxury' ? 2.5 : 1;
   const activitiesPerDay = pace === 'relaxed' ? 2 : pace === 'active' ? 4 : 3;
   
   const mockDays = [];
-  const startDate = new Date(startDateStr); // ✅ Use provided start date
   
   for (let i = 0; i < days; i++) {
-    const date = new Date(startDate);
-    date.setDate(startDate.getDate() + i);
+    const date = new Date();
+    date.setDate(date.getDate() + i);
     
     const dayActivities = [];
     const startHour = 9;
@@ -442,6 +441,47 @@ function generateHighQualityMockItinerary(destination, days, interests, budget, 
   console.log('Mock itinerary generated');
   return { days: mockDays };
 }
+
+// function generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr) {
+//   console.log('🎭 Generating high-quality mock itinerary...');
+  
+//   const budgetMultiplier = budget === 'budget' ? 0.6 : budget === 'luxury' ? 2.5 : 1;
+//   const activitiesPerDay = pace === 'relaxed' ? 2 : pace === 'active' ? 4 : 3;
+  
+//   const mockDays = [];
+//   const startDate = new Date(startDateStr); // ✅ Use provided start date
+  
+//   for (let i = 0; i < days; i++) {
+//     const date = new Date(startDate);
+//     date.setDate(startDate.getDate() + i);
+    
+//     const dayActivities = [];
+//     const startHour = 9;
+    
+//     for (let j = 0; j < activitiesPerDay; j++) {
+//       const hour = startHour + (j * 2);
+//       const activity = getDefaultActivity(interests, j);
+//       const baseCost = 20 + (j * 15);
+      
+//       dayActivities.push({
+//         time: `${hour.toString().padStart(2, '0')}:00`,
+//         activity: activity,
+//         location: `${destination} - ${['Downtown', 'Cultural District', 'Popular Area', 'Scenic Area'][j % 4]}`,
+//         duration: pace === 'relaxed' ? '3 hours' : pace === 'active' ? '1.5 hours' : '2 hours',
+//         cost: Math.round(baseCost * budgetMultiplier),
+//         notes: 'Check opening hours and enjoy!'
+//       });
+//     }
+    
+//     mockDays.push({
+//       date: date.toISOString().split('T')[0],
+//       activities: dayActivities
+//     });
+//   }
+  
+//   console.log('Mock itinerary generated');
+//   return { days: mockDays };
+// }
 
 // ===== AUTHENTICATION ROUTES =====
 app.post('/api/auth/register', async (req, res) => {
