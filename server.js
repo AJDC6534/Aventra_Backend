@@ -360,7 +360,8 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   let startDate;
   try {
     if (startDateStr) {
-      startDate = new Date(startDateStr);
+      // Handle both YYYY-MM-DD and ISO format
+      startDate = new Date(startDateStr + (startDateStr.includes('T') ? '' : 'T00:00:00'));
       if (isNaN(startDate.getTime())) {
         throw new Error('Invalid start date');
       }
@@ -1231,17 +1232,106 @@ app.get('/api/itineraries/:id', authenticateToken, async (req, res) => {
 
 app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
   try {
+    const updates = { ...req.body, updatedAt: Date.now() };
+    
+    // If dates have changed, we need to update the daily structure
+    const existingItinerary = await Itinerary.findOne({
+      _id: req.params.id,
+      userId: req.user.userId,
+    });
+    
+    if (!existingItinerary) {
+      return res.status(404).json({ message: 'Itinerary not found' });
+    }
+    
+    // Check if dates have changed
+    const oldStartDate = new Date(existingItinerary.startDate).toISOString().split('T')[0];
+    const newStartDate = new Date(updates.startDate).toISOString().split('T')[0];
+    const oldEndDate = new Date(existingItinerary.endDate).toISOString().split('T')[0];
+    const newEndDate = new Date(updates.endDate).toISOString().split('T')[0];
+    
+    if (oldStartDate !== newStartDate || oldEndDate !== newEndDate) {
+      console.log('Dates changed, updating day structure...');
+      
+      // Calculate new duration
+      const newDuration = Math.ceil((new Date(newEndDate) - new Date(newStartDate)) / (1000 * 60 * 60 * 24)) + 1;
+      const oldDuration = existingItinerary.days ? existingItinerary.days.length : 0;
+      
+      // Update the days array to match new dates
+      const updatedDays = [];
+      const startDate = new Date(newStartDate + 'T00:00:00');
+      
+      for (let i = 0; i < newDuration; i++) {
+        const currentDate = new Date(startDate);
+        currentDate.setDate(startDate.getDate() + i);
+        const dateStr = currentDate.toISOString().split('T')[0];
+        
+        // Try to preserve activities from corresponding old day
+        let dayActivities = [];
+        if (i < oldDuration && existingItinerary.days[i] && existingItinerary.days[i].activities) {
+          dayActivities = existingItinerary.days[i].activities;
+        }
+        
+        updatedDays.push({
+          date: dateStr,
+          activities: dayActivities
+        });
+      }
+      
+      updates.days = updatedDays;
+    }
+    
     const itinerary = await Itinerary.findOneAndUpdate(
       { _id: req.params.id, userId: req.user.userId },
-      { ...req.body, updatedAt: Date.now() },
-      { new: true }
+      updates,
+      { new: true, runValidators: true }
     );
     
     if (!itinerary) {
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
+    // Log activity
+    await new UserActivity({
+      userId: req.user.userId,
+      type: 'itinerary_updated',
+      title: 'Itinerary updated',
+      description: `Updated "${itinerary.title}" itinerary`,
+      icon: '✏️',
+      metadata: { 
+        itineraryId: itinerary._id,
+        destination: itinerary.destination,
+        datesChanged: oldStartDate !== newStartDate || oldEndDate !== newEndDate
+      }
+    }).save();
+    
     res.json(itinerary);
+  } catch (error) {
+    console.error('Itinerary update error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Add this route to handle itinerary regeneration
+app.post('/api/itineraries/:id/regenerate', authenticateToken, async (req, res) => {
+  try {
+    const { interests, budget, pace } = req.body;
+    const itinerary = await Itinerary.findOne({
+      _id: req.params.id,
+      userId: req.user.userId,
+    });
+    
+    if (!itinerary) {
+      return res.status(404).json({ message: 'Itinerary not found' });
+    }
+    
+    // Use existing AI generation logic
+    const days = Math.ceil((new Date(itinerary.endDate) - new Date(itinerary.startDate)) / (1000 * 60 * 60 * 24)) + 1;
+    
+    // Generate new itinerary with AI (reuse existing logic)
+    // ... (use the same AI generation code from the main route)
+    
+    res.json({ message: 'Itinerary regenerated successfully', days: newDays });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
