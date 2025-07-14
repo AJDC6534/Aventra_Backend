@@ -1,4 +1,4 @@
-// server.js - Main Express.js server
+// server.js - Main Express.js server with Photo Integration
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -58,6 +58,235 @@ const rateLimiter = {
     return true;
   }
 };
+
+// ===== PHOTO SERVICE UTILITIES =====
+
+// Photo service configuration
+const photoServices = {
+  unsplash: {
+    baseUrl: 'https://api.unsplash.com',
+    searchEndpoint: '/search/photos',
+    headers: {
+      'Authorization': `Client-ID ${process.env.UNSPLASH_ACCESS_KEY}`
+    }
+  },
+  pexels: {
+    baseUrl: 'https://api.pexels.com/v1',
+    searchEndpoint: '/search',
+    headers: {
+      'Authorization': process.env.PEXELS_API_KEY
+    }
+  },
+  pixabay: {
+    baseUrl: 'https://pixabay.com/api',
+    searchEndpoint: '/',
+    params: {
+      key: process.env.PIXABAY_API_KEY,
+      image_type: 'photo',
+      orientation: 'horizontal',
+      category: 'places'
+    }
+  }
+};
+
+// Function to fetch photos from Unsplash
+async function fetchUnsplashPhotos(query, count = 3) {
+  try {
+    if (!process.env.UNSPLASH_ACCESS_KEY) {
+      console.log('Unsplash API key not configured');
+      return [];
+    }
+
+    const url = `${photoServices.unsplash.baseUrl}${photoServices.unsplash.searchEndpoint}?query=${encodeURIComponent(query)}&per_page=${count}&orientation=landscape`;
+    
+    const response = await axios.get(url, {
+      headers: photoServices.unsplash.headers,
+      timeout: 5000
+    });
+
+    return response.data.results?.map(photo => ({
+      id: photo.id,
+      url: photo.urls.regular,
+      thumb: photo.urls.thumb,
+      description: photo.alt_description || photo.description || query,
+      photographer: photo.user.name,
+      photographerUrl: photo.user.links.html,
+      downloadUrl: photo.links.download_location,
+      source: 'unsplash'
+    })) || [];
+
+  } catch (error) {
+    console.error('Unsplash fetch error:', error.message);
+    return [];
+  }
+}
+
+// Function to fetch photos from Pexels
+async function fetchPexelsPhotos(query, count = 3) {
+  try {
+    if (!process.env.PEXELS_API_KEY) {
+      console.log('Pexels API key not configured');
+      return [];
+    }
+
+    const url = `${photoServices.pexels.baseUrl}${photoServices.pexels.searchEndpoint}?query=${encodeURIComponent(query)}&per_page=${count}&orientation=landscape`;
+    
+    const response = await axios.get(url, {
+      headers: photoServices.pexels.headers,
+      timeout: 5000
+    });
+
+    return response.data.photos?.map(photo => ({
+      id: photo.id,
+      url: photo.src.large,
+      thumb: photo.src.medium,
+      description: photo.alt || query,
+      photographer: photo.photographer,
+      photographerUrl: photo.photographer_url,
+      source: 'pexels'
+    })) || [];
+
+  } catch (error) {
+    console.error('Pexels fetch error:', error.message);
+    return [];
+  }
+}
+
+// Function to fetch photos from Pixabay
+async function fetchPixabayPhotos(query, count = 3) {
+  try {
+    if (!process.env.PIXABAY_API_KEY) {
+      console.log('Pixabay API key not configured');
+      return [];
+    }
+
+    const params = new URLSearchParams({
+      ...photoServices.pixabay.params,
+      q: query,
+      per_page: count.toString(),
+      min_width: 640,
+      min_height: 480
+    });
+
+    const url = `${photoServices.pixabay.baseUrl}${photoServices.pixabay.searchEndpoint}?${params}`;
+    
+    const response = await axios.get(url, { timeout: 5000 });
+
+    return response.data.hits?.map(photo => ({
+      id: photo.id,
+      url: photo.webformatURL,
+      thumb: photo.previewURL,
+      description: photo.tags || query,
+      photographer: photo.user,
+      source: 'pixabay'
+    })) || [];
+
+  } catch (error) {
+    console.error('Pixabay fetch error:', error.message);
+    return [];
+  }
+}
+
+// Main function to fetch photos from multiple sources
+async function fetchPhotosForDestination(destination, activityType = null, count = 3) {
+  const query = activityType ? `${destination} ${activityType}` : destination;
+  
+  console.log(`Fetching photos for: ${query}`);
+  
+  // Try all services in parallel with different queries
+  const searchQueries = [
+    query,
+    destination,
+    `${destination} travel`,
+    `${destination} tourism`
+  ];
+  
+  const photoPromises = [];
+  
+  // Add Unsplash requests
+  if (process.env.UNSPLASH_ACCESS_KEY) {
+    photoPromises.push(fetchUnsplashPhotos(searchQueries[0], Math.ceil(count / 3)));
+    photoPromises.push(fetchUnsplashPhotos(searchQueries[1], Math.ceil(count / 3)));
+  }
+  
+  // Add Pexels requests
+  if (process.env.PEXELS_API_KEY) {
+    photoPromises.push(fetchPexelsPhotos(searchQueries[0], Math.ceil(count / 3)));
+  }
+  
+  // Add Pixabay requests
+  if (process.env.PIXABAY_API_KEY) {
+    photoPromises.push(fetchPixabayPhotos(searchQueries[0], Math.ceil(count / 3)));
+  }
+  
+  try {
+    const results = await Promise.allSettled(photoPromises);
+    
+    // Combine all successful results
+    const allPhotos = results
+      .filter(result => result.status === 'fulfilled')
+      .flatMap(result => result.value)
+      .filter(photo => photo && photo.url);
+    
+    // Remove duplicates based on URL
+    const uniquePhotos = allPhotos.filter((photo, index, self) =>
+      index === self.findIndex(p => p.url === photo.url)
+    );
+    
+    // Shuffle and limit results
+    const shuffled = uniquePhotos.sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, count);
+    
+  } catch (error) {
+    console.error('Error fetching photos:', error);
+    return [];
+  }
+}
+
+// Function to get activity-specific photos
+async function getActivityPhotos(destination, activity, location) {
+  try {
+    // Extract activity type for better photo search
+    const activityLower = activity.toLowerCase();
+    let activityType = '';
+    
+    if (activityLower.includes('museum') || activityLower.includes('gallery')) {
+      activityType = 'museum';
+    } else if (activityLower.includes('temple') || activityLower.includes('shrine') || activityLower.includes('church')) {
+      activityType = 'temple';
+    } else if (activityLower.includes('market') || activityLower.includes('shopping')) {
+      activityType = 'market';
+    } else if (activityLower.includes('park') || activityLower.includes('garden')) {
+      activityType = 'park';
+    } else if (activityLower.includes('restaurant') || activityLower.includes('food') || activityLower.includes('dining')) {
+      activityType = 'food';
+    } else if (activityLower.includes('beach')) {
+      activityType = 'beach';
+    } else if (activityLower.includes('mountain') || activityLower.includes('hiking')) {
+      activityType = 'mountain';
+    }
+    
+    // Try specific location first, then fall back to destination
+    const searchQueries = [
+      location,
+      `${destination} ${activityType}`,
+      `${destination} ${activity}`,
+      destination
+    ].filter(q => q && q.trim());
+    
+    for (const query of searchQueries) {
+      const photos = await fetchPhotosForDestination(query, null, 1);
+      if (photos.length > 0) {
+        return photos[0];
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error getting activity photos:', error);
+    return null;
+  }
+}
 
 // ===== DATABASE SCHEMAS =====
 const userSchema = new mongoose.Schema({
@@ -147,6 +376,15 @@ const itinerarySchema = new mongoose.Schema({
   },
   days: [{
     date: String,
+    dayPhoto: {
+      id: String,
+      url: String,
+      thumb: String,
+      description: String,
+      photographer: String,
+      photographerUrl: String,
+      source: String
+    },
     activities: [{
       time: String,
       activity: String,
@@ -154,9 +392,40 @@ const itinerarySchema = new mongoose.Schema({
       duration: String,
       cost: Number,
       notes: String,
+      photo: {
+        id: String,
+        url: String,
+        thumb: String,
+        description: String,
+        photographer: String,
+        photographerUrl: String,
+        source: String
+      },
+      fallbackPhoto: {
+        id: String,
+        url: String,
+        thumb: String,
+        description: String,
+        photographer: String,
+        photographerUrl: String,
+        source: String
+      }
     }],
   }],
-  rating: { type: Number, min: 1, max: 5 }, // Added for trip ratings
+  
+  // New photo-related fields
+  photosEnabled: { type: Boolean, default: false },
+  destinationPhotos: [{
+    id: String,
+    url: String,
+    thumb: String,
+    description: String,
+    photographer: String,
+    photographerUrl: String,
+    source: String
+  }],
+  
+  rating: { type: Number, min: 1, max: 5 },
   aiGenerated: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
@@ -427,6 +696,64 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   return { days: sanitizedDays };
 }
 
+// Enhanced sanitization function that includes photos
+async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr) {
+  console.log('🧹 Sanitizing AI itinerary data with photos...');
+  
+  // First get the basic sanitized itinerary
+  const basicItinerary = sanitizeAIItinerary(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr);
+  
+  if (!basicItinerary) {
+    return null;
+  }
+  
+  // Get destination photos
+  const destinationPhotos = await fetchPhotosForDestination(destination, null, 5);
+  
+  // Add photos to each day and activity
+  const enhancedDays = await Promise.all(
+    basicItinerary.days.map(async (day, dayIndex) => {
+      // Add photos to each activity
+      const enhancedActivities = await Promise.all(
+        day.activities.map(async (activity, activityIndex) => {
+          try {
+            // Get activity-specific photo
+            const activityPhoto = await getActivityPhotos(destination, activity.activity, activity.location);
+            
+            return {
+              ...activity,
+              photo: activityPhoto,
+              // Fallback to destination photos if no activity photo found
+              fallbackPhoto: activityPhoto ? null : destinationPhotos[activityIndex % destinationPhotos.length] || null
+            };
+          } catch (error) {
+            console.error(`Error adding photo to activity ${activityIndex}:`, error);
+            return {
+              ...activity,
+              photo: null,
+              fallbackPhoto: destinationPhotos[activityIndex % destinationPhotos.length] || null
+            };
+          }
+        })
+      );
+      
+      return {
+        ...day,
+        activities: enhancedActivities,
+        // Add a featured photo for the day
+        dayPhoto: destinationPhotos[dayIndex % destinationPhotos.length] || null
+      };
+    })
+  );
+  
+  return {
+    ...basicItinerary,
+    days: enhancedDays,
+    destinationPhotos: destinationPhotos.slice(0, 3), // Keep top 3 for general use
+    photosEnabled: true
+  };
+}
+
 function generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr) {
   console.log('🎭 Generating high-quality mock itinerary...');
   console.log('Start date for mock:', startDateStr);
@@ -482,6 +809,47 @@ function generateHighQualityMockItinerary(destination, days, interests, budget, 
   
   console.log('Mock itinerary generated with correct dates');
   return { days: mockDays };
+}
+
+// Enhanced mock itinerary generation with photos
+async function generateHighQualityMockItineraryWithPhotos(destination, days, interests, budget, pace, startDateStr) {
+  console.log('🎭 Generating high-quality mock itinerary with photos...');
+  
+  // First get the basic mock itinerary
+  const basicItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr);
+  
+  // Get destination photos
+  const destinationPhotos = await fetchPhotosForDestination(destination, null, 5);
+  
+  // Add photos to each day and activity
+  const enhancedDays = await Promise.all(
+    basicItinerary.days.map(async (day, dayIndex) => {
+      const enhancedActivities = await Promise.all(
+        day.activities.map(async (activity, activityIndex) => {
+          const activityPhoto = await getActivityPhotos(destination, activity.activity, activity.location);
+          
+          return {
+            ...activity,
+            photo: activityPhoto,
+            fallbackPhoto: activityPhoto ? null : destinationPhotos[activityIndex % destinationPhotos.length] || null
+          };
+        })
+      );
+      
+      return {
+        ...day,
+        activities: enhancedActivities,
+        dayPhoto: destinationPhotos[dayIndex % destinationPhotos.length] || null
+      };
+    })
+  );
+  
+  return {
+    ...basicItinerary,
+    days: enhancedDays,
+    destinationPhotos: destinationPhotos.slice(0, 3),
+    photosEnabled: true
+  };
 }
 
 // ===== AUTHENTICATION ROUTES =====
@@ -541,6 +909,232 @@ app.post('/api/auth/login', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===== NEW PHOTO API ROUTES =====
+
+// Route to get photos for a destination
+app.get('/api/photos/destination/:destination', authenticateToken, async (req, res) => {
+  try {
+    const { destination } = req.params;
+    const count = parseInt(req.query.count) || 6;
+    const activityType = req.query.type || null;
+    
+    if (!destination || destination.trim().length === 0) {
+      return res.status(400).json({ message: 'Destination is required' });
+    }
+    
+    const photos = await fetchPhotosForDestination(destination.trim(), activityType, count);
+    
+    res.json({
+      success: true,
+      destination: destination.trim(),
+      count: photos.length,
+      photos
+    });
+    
+  } catch (error) {
+    console.error('Destination photos API error:', error);
+    res.status(500).json({ 
+      message: 'Failed to fetch destination photos',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+});
+
+// Route to get photos for a specific activity
+app.get('/api/photos/activity', authenticateToken, async (req, res) => {
+  try {
+    const { destination, activity, location } = req.query;
+    
+    if (!destination || !activity) {
+      return res.status(400).json({ message: 'Destination and activity are required' });
+    }
+    
+    const photo = await getActivityPhotos(destination, activity, location);
+    
+    res.json({
+      success: true,
+      destination,
+      activity,
+      location,
+      photo
+    });
+    
+  } catch (error) {
+    console.error('Activity photos API error:', error);
+    res.status(500).json({ 
+      message: 'Failed to fetch activity photos',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+});
+
+// Route to check photo service availability
+app.get('/api/photos/health', authenticateToken, async (req, res) => {
+  try {
+    const services = {
+      unsplash: {
+        configured: !!process.env.UNSPLASH_ACCESS_KEY,
+        status: 'unknown'
+      },
+      pexels: {
+        configured: !!process.env.PEXELS_API_KEY,
+        status: 'unknown'
+      },
+      pixabay: {
+        configured: !!process.env.PIXABAY_API_KEY,
+        status: 'unknown'
+      }
+    };
+    
+    // Test each configured service
+    const testPromises = [];
+    
+    if (services.unsplash.configured) {
+      testPromises.push(
+        fetchUnsplashPhotos('test', 1)
+          .then(photos => {
+            services.unsplash.status = photos.length > 0 ? 'working' : 'no_results';
+          })
+          .catch(() => {
+            services.unsplash.status = 'error';
+          })
+      );
+    }
+    
+    if (services.pexels.configured) {
+      testPromises.push(
+        fetchPexelsPhotos('test', 1)
+          .then(photos => {
+            services.pexels.status = photos.length > 0 ? 'working' : 'no_results';
+          })
+          .catch(() => {
+            services.pexels.status = 'error';
+          })
+      );
+    }
+    
+    if (services.pixabay.configured) {
+      testPromises.push(
+        fetchPixabayPhotos('test', 1)
+          .then(photos => {
+            services.pixabay.status = photos.length > 0 ? 'working' : 'no_results';
+          })
+          .catch(() => {
+            services.pixabay.status = 'error';
+          })
+      );
+    }
+    
+    await Promise.allSettled(testPromises);
+    
+    res.json({
+      success: true,
+      services,
+      summary: {
+        configured: Object.values(services).filter(s => s.configured).length,
+        working: Object.values(services).filter(s => s.status === 'working').length,
+        total: 3
+      }
+    });
+    
+  } catch (error) {
+    console.error('Photo health check error:', error);
+    res.status(500).json({ 
+      message: 'Photo service health check failed',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+});
+
+// Route to track photo downloads (for attribution compliance)
+app.post('/api/photos/download', authenticateToken, async (req, res) => {
+  try {
+    const { photoId, source, downloadUrl } = req.body;
+    
+    if (source === 'unsplash' && downloadUrl && process.env.UNSPLASH_ACCESS_KEY) {
+      // Trigger download tracking for Unsplash (required by their API terms)
+      try {
+        await axios.get(downloadUrl, {
+          headers: photoServices.unsplash.headers
+        });
+        console.log(`Unsplash download tracked for photo ${photoId}`);
+      } catch (error) {
+        console.error('Unsplash download tracking error:', error);
+      }
+    }
+    
+    // Log activity
+    await new UserActivity({
+      userId: req.user.userId,
+      type: 'photo_downloaded',
+      title: 'Photo downloaded',
+      description: `Downloaded photo from ${source}`,
+      icon: '📸',
+      metadata: { photoId, source }
+    }).save();
+    
+    res.json({ success: true, message: 'Download tracked successfully' });
+    
+  } catch (error) {
+    console.error('Photo download tracking error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Route to get photo attribution info
+app.get('/api/photos/:source/:photoId/attribution', async (req, res) => {
+  try {
+    const { source, photoId } = req.params;
+    
+    let attribution = {};
+    
+    switch (source.toLowerCase()) {
+      case 'unsplash':
+        attribution = {
+          text: 'Photo by {photographer} on Unsplash',
+          url: 'https://unsplash.com',
+          required: true,
+          format: 'Photo by [photographer_name] on Unsplash'
+        };
+        break;
+        
+      case 'pexels':
+        attribution = {
+          text: 'Photo by {photographer} from Pexels',
+          url: 'https://pexels.com',
+          required: true,
+          format: 'Photo by [photographer_name] from Pexels'
+        };
+        break;
+        
+      case 'pixabay':
+        attribution = {
+          text: 'Image by {photographer} from Pixabay',
+          url: 'https://pixabay.com',
+          required: false,
+          format: 'Image by [photographer_name] from Pixabay (optional)'
+        };
+        break;
+        
+      default:
+        return res.status(400).json({ message: 'Invalid photo source' });
+    }
+    
+    res.json({
+      source,
+      photoId,
+      attribution
+    });
+    
+  } catch (error) {
+    console.error('Photo attribution error:', error);
+    res.status(500).json({ 
+      message: 'Failed to get photo attribution',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 });
 
@@ -978,7 +1572,9 @@ app.get('/api/users/travel-history', authenticateToken, async (req, res) => {
       rating: trip.rating || null,
       duration: Math.ceil((new Date(trip.endDate) - new Date(trip.startDate)) / (1000 * 60 * 60 * 24)) + 1,
       aiGenerated: trip.aiGenerated || false,
-      activities: trip.days ? trip.days.reduce((total, day) => total + (day.activities?.length || 0), 0) : 0
+      activities: trip.days ? trip.days.reduce((total, day) => total + (day.activities?.length || 0), 0) : 0,
+      photosEnabled: trip.photosEnabled || false,
+      destinationPhotos: trip.destinationPhotos || []
     }));
     
     res.json(formattedTrips);
@@ -1149,45 +1745,6 @@ async function updateUserStats(userId) {
   }
 }
 
-// ===== PROFILE PICTURE UPLOAD ROUTE =====
-app.post('/api/users/profile-picture', authenticateToken, async (req, res) => {
-  try {
-    // In a real implementation, you would handle file upload here
-    // For now, we'll just return a success response
-    // You would typically use multer or similar for file handling
-    
-    res.status(501).json({ 
-      message: 'Profile picture upload not implemented yet',
-      note: 'This would typically handle file upload with multer and cloud storage'
-    });
-    
-  } catch (error) {
-    console.error('Profile picture upload error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// ===== BULK USER STATS UPDATE ROUTE (Admin/Maintenance) =====
-app.post('/api/admin/update-user-stats', authenticateToken, async (req, res) => {
-  try {
-    // This would be an admin-only route in a real implementation
-    const users = await User.find({}).select('_id');
-    
-    for (const user of users) {
-      await updateUserStats(user._id);
-    }
-    
-    res.json({ 
-      success: true, 
-      message: `Updated stats for ${users.length} users` 
-    });
-    
-  } catch (error) {
-    console.error('Bulk user stats update error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
 // ===== ITINERARY ROUTES =====
 app.post('/api/itineraries', authenticateToken, async (req, res) => {
   try {
@@ -1268,13 +1825,16 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
         
         // Try to preserve activities from corresponding old day
         let dayActivities = [];
+        let dayPhoto = null;
         if (i < oldDuration && existingItinerary.days[i] && existingItinerary.days[i].activities) {
           dayActivities = existingItinerary.days[i].activities;
+          dayPhoto = existingItinerary.days[i].dayPhoto || null;
         }
         
         updatedDays.push({
           date: dateStr,
-          activities: dayActivities
+          activities: dayActivities,
+          dayPhoto: dayPhoto
         });
       }
       
@@ -1312,31 +1872,6 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Add this route to handle itinerary regeneration
-app.post('/api/itineraries/:id/regenerate', authenticateToken, async (req, res) => {
-  try {
-    const { interests, budget, pace } = req.body;
-    const itinerary = await Itinerary.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
-    
-    if (!itinerary) {
-      return res.status(404).json({ message: 'Itinerary not found' });
-    }
-    
-    // Use existing AI generation logic
-    const days = Math.ceil((new Date(itinerary.endDate) - new Date(itinerary.startDate)) / (1000 * 60 * 60 * 24)) + 1;
-    
-    // Generate new itinerary with AI (reuse existing logic)
-    // ... (use the same AI generation code from the main route)
-    
-    res.json({ message: 'Itinerary regenerated successfully', days: newDays });
-  } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
 app.delete('/api/itineraries/:id', authenticateToken, async (req, res) => {
   try {
     const itinerary = await Itinerary.findOneAndDelete({
@@ -1354,13 +1889,13 @@ app.delete('/api/itineraries/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// ===== AI ITINERARY GENERATION ROUTE =====
+// ===== ENHANCED ITINERARY GENERATION ROUTE WITH PHOTOS =====
 app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
   try {
-    const { destination, startDate, endDate, interests, budget, pace } = req.body;
+    const { destination, startDate, endDate, interests, budget, pace, includePhotos = true } = req.body;
     const userId = req.user.userId;
     
-    console.log('Itinerary generation request:', { destination, startDate, endDate, interests, budget, pace });
+    console.log('Itinerary generation request:', { destination, startDate, endDate, interests, budget, pace, includePhotos });
     
     const days = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
     
@@ -1396,6 +1931,7 @@ Create a JSON response with this EXACT structure. Follow these rules strictly:
 3. Times must be in HH:MM format
 4. All fields are required
 5. Generate exactly ${days} days worth of activities
+6. Make location names specific and detailed for better photo matching
 
 {
   "days": [
@@ -1414,7 +1950,7 @@ Create a JSON response with this EXACT structure. Follow these rules strictly:
   ]
 }
 
-Generate exactly ${days} days of activities. Make costs realistic integers in USD. No explanatory text, just the JSON.`;
+Generate exactly ${days} days of activities. Make costs realistic integers in USD. Make location names specific for photo search. No explanatory text, just the JSON.`;
 
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         const result = await model.generateContent(prompt);
@@ -1435,14 +1971,18 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
         console.log('Parsing AI response...');
         let aiItinerary = JSON.parse(jsonStr);
         
-        // Validate and sanitize the data
-        const sanitizedItinerary = sanitizeAIItinerary(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
+        // Validate and sanitize the data with photos
+        if (includePhotos) {
+          console.log('Adding photos to AI-generated itinerary...');
+          generatedItinerary = await sanitizeAIItineraryWithPhotos(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
+        } else {
+          generatedItinerary = sanitizeAIItinerary(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
+        }
         
-        if (sanitizedItinerary && sanitizedItinerary.days && sanitizedItinerary.days.length > 0) {
-            generatedItinerary = sanitizedItinerary;
+        if (generatedItinerary && generatedItinerary.days && generatedItinerary.days.length > 0) {
             useAI = true;
             provider = 'gemini';
-            console.log('AI itinerary generated successfully!');
+            console.log('AI itinerary with photos generated successfully!');
         } else {
           throw new Error('Invalid itinerary structure from AI');
         }
@@ -1450,7 +1990,12 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       } catch (aiError) {
         console.error('AI generation failed:', aiError.message);
         console.log('Falling back to mock generation...');
-        generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDate);
+        
+        if (includePhotos) {
+          generatedItinerary = await generateHighQualityMockItineraryWithPhotos(destination, days, interests, budget, pace, startDate);
+        } else {
+          generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDate);
+        }
         provider = 'mock';
       }
     } else {
@@ -1459,7 +2004,12 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       } else {
         console.log('Rate limited, using mock generation');
       }
-      generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDate);
+      
+      if (includePhotos) {
+        generatedItinerary = await generateHighQualityMockItineraryWithPhotos(destination, days, interests, budget, pace, startDate);
+      } else {
+        generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDate);
+      }
       provider = 'mock';
     }
     
@@ -1484,16 +2034,43 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       },
       days: generatedItinerary.days,
       aiGenerated: useAI,
+      // Add photo metadata
+      photosEnabled: includePhotos,
+      destinationPhotos: generatedItinerary.destinationPhotos || [],
     });
     
     const savedItinerary = await itinerary.save();
+    
+    // Log activity with photo info
+    await new UserActivity({
+      userId,
+      type: 'itinerary_generated',
+      title: `${useAI ? 'AI-Generated' : 'Custom'} itinerary created`,
+      description: `Generated ${days}-day itinerary for ${destination}${includePhotos ? ' with photos' : ''}`,
+      icon: '🗺️',
+      metadata: { 
+        destination, 
+        days, 
+        provider,
+        photosEnabled: includePhotos,
+        photoCount: generatedItinerary.destinationPhotos?.length || 0
+      }
+    }).save();
     
     console.log('Itinerary saved successfully!');
     
     res.json({
       ...savedItinerary.toObject(),
       provider,
-      message: useAI ? 'AI-generated itinerary created!' : 'Custom itinerary created!'
+      photosEnabled: includePhotos,
+      photoServices: {
+        unsplash: !!process.env.UNSPLASH_ACCESS_KEY,
+        pexels: !!process.env.PEXELS_API_KEY,
+        pixabay: !!process.env.PIXABAY_API_KEY
+      },
+      message: useAI ? 
+        `AI-generated itinerary created${includePhotos ? ' with photos' : ''}!` : 
+        `Custom itinerary created${includePhotos ? ' with photos' : ''}!`
     });
     
   } catch (error) {
@@ -1505,273 +2082,238 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
   }
 });
 
-// ===== SAFETY & EMERGENCY ROUTES =====
-app.put('/api/users/safety-settings', authenticateToken, async (req, res) => {
+// ===== ADD PHOTOS TO EXISTING ITINERARY ROUTE =====
+app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) => {
   try {
-    const { emergencyContacts, locationSharing, medicalInfo, travelPreferences } = req.body;
-    
-    // Validate emergency contacts
-    if (!emergencyContacts || !Array.isArray(emergencyContacts) || emergencyContacts.length === 0) {
-      return res.status(400).json({ message: 'At least one emergency contact is required' });
-    }
-    
-    // Ensure one primary contact
-    const primaryContacts = emergencyContacts.filter(contact => contact.isPrimary);
-    if (primaryContacts.length !== 1) {
-      emergencyContacts.forEach((contact, index) => {
-        contact.isPrimary = index === 0;
-      });
-    }
-    
-    const updates = {
-      emergencyContacts,
-      locationSharing,
-      medicalInfo,
-      travelPreferences,
-      updatedAt: Date.now()
-    };
-    
-    const user = await User.findByIdAndUpdate(
-      req.user.userId,
-      updates,
-      { new: true, runValidators: true }
-    ).select('-password');
-    
-    // Log activity
-    await new UserActivity({
+    const itinerary = await Itinerary.findOne({
+      _id: req.params.id,
       userId: req.user.userId,
-      type: 'safety_updated',
-      title: 'Safety settings updated',
-      description: 'Emergency contacts and safety preferences updated',
-    }).save();
-    
-    res.json({
-      emergencyContacts: user.emergencyContacts,
-      locationSharing: user.locationSharing,
-      medicalInfo: user.medicalInfo,
-      travelPreferences: user.travelPreferences
     });
-    
-  } catch (error) {
-    console.error('Safety settings update error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-app.put('/api/users/location', authenticateToken, async (req, res) => {
-  try {
-    const { latitude, longitude, address, accuracy } = req.body;
-    
-    if (!latitude || !longitude) {
-      return res.status(400).json({ message: 'Latitude and longitude are required' });
-    }
-    
-    const locationUpdate = {
-      currentLocation: {
-        latitude,
-        longitude,
-        address: address || `${latitude}, ${longitude}`,
-        accuracy: accuracy || 0,
-        timestamp: new Date()
-      },
-      updatedAt: Date.now()
-    };
-    
-    const user = await User.findByIdAndUpdate(
-      req.user.userId,
-      locationUpdate,
-      { new: true }
-    ).select('currentLocation');
-    
-    res.json({ success: true, location: user.currentLocation });
-    
-  } catch (error) {
-    console.error('Location update error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-app.post('/api/users/check-in', authenticateToken, async (req, res) => {
-  try {
-    const { location, status, message, automatic } = req.body;
-    
-    if (!location || !location.latitude || !location.longitude) {
-      return res.status(400).json({ message: 'Location is required for check-in' });
-    }
-    
-    const checkIn = new CheckIn({
-      userId: req.user.userId,
-      location,
-      status: status || 'safe',
-      message,
-      automatic: automatic || false
-    });
-    
-    await checkIn.save();
-    
-    // Update user's current location
-    await User.findByIdAndUpdate(req.user.userId, {
-      currentLocation: {
-        ...location,
-        timestamp: new Date()
-      }
-    });
-    
-    // Log activity
-    await new UserActivity({
-      userId: req.user.userId,
-      type: 'check_in',
-      title: automatic ? 'Automatic check-in' : 'Manual check-in',
-      description: `User checked in from ${location.address || 'current location'}`,
-      metadata: { location, status }
-    }).save();
-    
-    res.json({ success: true, checkIn });
-    
-  } catch (error) {
-    console.error('Check-in error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-app.post('/api/emergency/alert', authenticateToken, async (req, res) => {
-  try {
-    const { type, location, emergencyContacts, message } = req.body;
-    
-    if (!emergencyContacts || emergencyContacts.length === 0) {
-      return res.status(400).json({ message: 'Emergency contacts are required' });
-    }
-    
-    const alert = new EmergencyAlert({
-      userId: req.user.userId,
-      alertType: type || 'other',
-      location,
-      message,
-      emergencyContacts
-    });
-    
-    await alert.save();
-    
-    // Log critical activity
-    await new UserActivity({
-      userId: req.user.userId,
-      type: 'emergency_alert',
-      title: 'EMERGENCY ALERT SENT',
-      description: `Emergency alert sent to ${emergencyContacts.length} contacts`,
-      metadata: { alertType: type, location }
-    }).save();
-    
-    res.json({ 
-      success: true, 
-      alertId: alert._id,
-      message: 'Emergency alert sent successfully',
-      contactsNotified: emergencyContacts.length
-    });
-    
-  } catch (error) {
-    console.error('Emergency alert error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-app.get('/api/users/activity', authenticateToken, async (req, res) => {
-  try {
-    const activities = await UserActivity
-      .find({ userId: req.user.userId })
-      .sort({ createdAt: -1 })
-      .limit(10)
-      .lean();
-    
-    const formattedActivities = activities.map(activity => ({
-      id: activity._id,
-      icon: activity.icon,
-      title: activity.title,
-      description: activity.description,
-      date: activity.createdAt
-    }));
-    
-    res.json(formattedActivities);
-    
-  } catch (error) {
-    console.error('Activity fetch error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-app.get('/api/users/travel-history', authenticateToken, async (req, res) => {
-  try {
-    const trips = await Itinerary
-      .find({ 
-        userId: req.user.userId,
-        endDate: { $lt: new Date() }
-      })
-      .sort({ endDate: -1 })
-      .lean();
-    
-    const formattedTrips = trips.map(trip => ({
-      id: trip._id,
-      title: trip.title,
-      destination: trip.destination,
-      startDate: trip.startDate,
-      endDate: trip.endDate,
-      totalCost: trip.budget || 0,
-      rating: trip.rating || null
-    }));
-    
-    res.json(formattedTrips);
-    
-  } catch (error) {
-    console.error('Travel history fetch error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-app.put('/api/itineraries/:id/rate', authenticateToken, async (req, res) => {
-  try {
-    const { rating } = req.body;
-    
-    if (!rating || rating < 1 || rating > 5) {
-      return res.status(400).json({ message: 'Rating must be between 1 and 5' });
-    }
-    
-    const itinerary = await Itinerary.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user.userId },
-      { rating, updatedAt: Date.now() },
-      { new: true }
-    );
     
     if (!itinerary) {
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
+    console.log(`Adding photos to existing itinerary: ${itinerary.title}`);
+    
+    // Get destination photos
+    const destinationPhotos = await fetchPhotosForDestination(itinerary.destination, null, 5);
+    
+    // Add photos to each day and activity
+    const enhancedDays = await Promise.all(
+      itinerary.days.map(async (day, dayIndex) => {
+        const enhancedActivities = await Promise.all(
+          day.activities.map(async (activity, activityIndex) => {
+            // Skip if photo already exists
+            if (activity.photo && activity.photo.url) {
+              return activity;
+            }
+            
+            const activityPhoto = await getActivityPhotos(itinerary.destination, activity.activity, activity.location);
+            
+            return {
+              ...activity,
+              photo: activityPhoto,
+              fallbackPhoto: activityPhoto ? null : destinationPhotos[activityIndex % destinationPhotos.length] || null
+            };
+          })
+        );
+        
+        return {
+          ...day,
+          activities: enhancedActivities,
+          dayPhoto: day.dayPhoto || destinationPhotos[dayIndex % destinationPhotos.length] || null
+        };
+      })
+    );
+    
+    // Update the itinerary
+    const updatedItinerary = await Itinerary.findByIdAndUpdate(
+      req.params.id,
+      {
+        days: enhancedDays,
+        destinationPhotos: destinationPhotos.slice(0, 3),
+        photosEnabled: true,
+        updatedAt: Date.now()
+      },
+      { new: true }
+    );
+    
+    // Log activity
     await new UserActivity({
       userId: req.user.userId,
-      type: 'trip_rated',
-      title: 'Trip rated',
-      description: `Rated "${itinerary.title}" ${rating} stars`,
-      metadata: { itineraryId: itinerary._id, rating }
+      type: 'photos_added',
+      title: 'Photos added to itinerary',
+      description: `Added photos to "${itinerary.title}"`,
+      icon: '📸',
+      metadata: { 
+        itineraryId: itinerary._id,
+        photoCount: destinationPhotos.length
+      }
     }).save();
     
-    res.json({ success: true, rating });
+    res.json({
+      success: true,
+      message: 'Photos added successfully',
+      photoCount: destinationPhotos.length,
+      itinerary: updatedItinerary
+    });
     
   } catch (error) {
-    console.error('Trip rating error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    console.error('Add photos error:', error);
+    res.status(500).json({ 
+      message: 'Failed to add photos to itinerary',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 });
 
-app.put('/api/users/change-password', authenticateToken, async (req, res) => {
+// ===== REFRESH SINGLE ACTIVITY PHOTO ROUTE =====
+app.post('/api/itineraries/:id/days/:dayIndex/activities/:activityIndex/refresh-photo', authenticateToken, async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const { id, dayIndex, activityIndex } = req.params;
     
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ message: 'Current and new passwords are required' });
+    const itinerary = await Itinerary.findOne({
+      _id: id,
+      userId: req.user.userId,
+    });
+    
+    if (!itinerary) {
+      return res.status(404).json({ message: 'Itinerary not found' });
     }
     
-    if (newPassword.length < 8) {
-      return res.status(400).json({ message: 'New password must be at least 8 characters long' });
+    const dayIdx = parseInt(dayIndex);
+    const actIdx = parseInt(activityIndex);
+    
+    if (!itinerary.days[dayIdx] || !itinerary.days[dayIdx].activities[actIdx]) {
+      return res.status(404).json({ message: 'Activity not found' });
     }
     
+    const activity = itinerary.days[dayIdx].activities[actIdx];
+    
+    // Get new photo for this activity
+    const newPhoto = await getActivityPhotos(itinerary.destination, activity.activity, activity.location);
+    
+    // Update the specific activity
+    itinerary.days[dayIdx].activities[actIdx].photo = newPhoto;
+    itinerary.updatedAt = Date.now();
+    
+    await itinerary.save();
+    
+    res.json({
+      success: true,
+      message: 'Activity photo refreshed',
+      photo: newPhoto
+    });
+    
+  } catch (error) {
+    console.error('Refresh photo error:', error);
+    res.status(500).json({ 
+      message: 'Failed to refresh photo',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+});
+
+// ===== BATCH PHOTO OPERATIONS ROUTE =====
+app.post('/api/photos/batch-operations', authenticateToken, async (req, res) => {
+  try {
+    const { operation, destinations, count = 3 } = req.body;
+    
+    if (!operation || !destinations || !Array.isArray(destinations)) {
+      return res.status(400).json({ message: 'Operation and destinations array are required' });
+    }
+    
+    const results = {};
+    
+    switch (operation) {
+      case 'fetch_destination_photos':
+        for (const destination of destinations.slice(0, 5)) { // Limit to 5 destinations
+          try {
+            const photos = await fetchPhotosForDestination(destination, null, count);
+            results[destination] = {
+              success: true,
+              count: photos.length,
+              photos
+            };
+          } catch (error) {
+            results[destination] = {
+              success: false,
+              error: error.message,
+              photos: []
+            };
+          }
+        }
+        break;
+        
+      case 'test_photo_services':
+        const testResults = {};
+        
+        if (process.env.UNSPLASH_ACCESS_KEY) {
+          try {
+            const unsplashPhotos = await fetchUnsplashPhotos('travel', 1);
+            testResults.unsplash = { working: unsplashPhotos.length > 0, count: unsplashPhotos.length };
+          } catch (error) {
+            testResults.unsplash = { working: false, error: error.message };
+          }
+        }
+        
+        if (process.env.PEXELS_API_KEY) {
+          try {
+            const pexelsPhotos = await fetchPexelsPhotos('travel', 1);
+            testResults.pexels = { working: pexelsPhotos.length > 0, count: pexelsPhotos.length };
+          } catch (error) {
+            testResults.pexels = { working: false, error: error.message };
+          }
+        }
+        
+        if (process.env.PIXABAY_API_KEY) {
+          try {
+            const pixabayPhotos = await fetchPixabayPhotos('travel', 1);
+            testResults.pixabay = { working: pixabayPhotos.length > 0, count: pixabayPhotos.length };
+          } catch (error) {
+            testResults.pixabay = { working: false, error: error.message };
+          }
+        }
+        
+        results.serviceTests = testResults;
+        break;
+        
+      default:
+        return res.status(400).json({ message: 'Invalid operation' });
+    }
+    
+    res.json({
+      success: true,
+      operation,
+      results
+    });
+    
+  } catch (error) {
+    console.error('Batch photo operations error:', error);
+    res.status(500).json({ 
+      message: 'Batch operation failed',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+});
+
+// ===== CHAT ROUTES =====
+app.post('/api/chat', authenticateToken, async (req, res) => {
+  try {
+    const { message, itineraryId } = req.body;
+    const userId = req.user.userId;
+    
+    console.log('Chat request received:', { userId, message, itineraryId });
+    
+    if (!message || message.trim().length === 0) {
+      return res.status(400).json({ 
+        message: 'Message is required',
+        response: 'Please enter a message to chat with me!' 
+      });
+    }
+    
+    // Get user preferences for context
     const user = await User.findById(req.user.userId);
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     
@@ -1846,187 +2388,69 @@ app.delete('/api/users/delete-account', authenticateToken, async (req, res) => {
   }
 });
 
-// ===== CHAT ROUTES =====
-app.post('/api/chat', authenticateToken, async (req, res) => {
+// ===== PROFILE PICTURE UPLOAD ROUTE =====
+app.post('/api/users/profile-picture', authenticateToken, async (req, res) => {
   try {
-    const { message, itineraryId } = req.body;
-    const userId = req.user.userId;
+    // In a real implementation, you would handle file upload here
+    // For now, we'll just return a success response
+    // You would typically use multer or similar for file handling
     
-    console.log('Chat request received:', { userId, message, itineraryId });
-    
-    if (!message || message.trim().length === 0) {
-      return res.status(400).json({ 
-        message: 'Message is required',
-        response: 'Please enter a message to chat with me!' 
-      });
-    }
-    
-    // Get user preferences for context
-    const user = await User.findById(userId);
-    let itinerary = null;
-    
-    // Handle empty itineraryId properly
-    if (itineraryId && itineraryId !== 'undefined' && itineraryId !== '' && itineraryId.length === 24) {
-      try {
-        itinerary = await Itinerary.findById(itineraryId);
-      } catch (err) {
-        console.log('Invalid itinerary ID, proceeding without itinerary context');
-      }
-    }
-    
-    let aiResponse;
-    let useAI = false;
-    
-    // Check if we should try Gemini API
-    const hasValidKey = process.env.GEMINI_API_KEY && 
-                       process.env.GEMINI_API_KEY;
-    
-    const withinRateLimit = rateLimiter.isAllowed(userId);
-    
-    if (hasValidKey && withinRateLimit && genAI) {
-      try {
-        console.log('Attempting Gemini API call...');
-        
-        // Build context prompt
-        let contextPrompt = `You are an expert travel planning assistant. Help users plan amazing trips with personalized recommendations.
-
-INSTRUCTIONS:
-- Provide specific, actionable travel advice
-- Include practical tips and local insights
-- Be enthusiastic but concise
-- Use emojis to make responses engaging
-- Focus on the user's specific question
-
-`;
-        
-        // Add user context
-        if (user?.preferences) {
-          const interests = user.preferences.interests?.join(', ') || 'general travel';
-          const budget = user.preferences.budget || 'flexible';
-          const travelStyle = user.preferences.travelStyle || 'flexible';
-          contextPrompt += `USER PREFERENCES:
-- Interests: ${interests}
-- Budget: ${budget}
-- Travel style: ${travelStyle}
-
-`;
-        }
-        
-        // Add itinerary context
-        if (itinerary) {
-          contextPrompt += `CURRENT TRIP CONTEXT:
-- Destination: ${itinerary.destination}
-- Dates: ${new Date(itinerary.startDate).toDateString()} to ${new Date(itinerary.endDate).toDateString()}
-- Duration: ${Math.ceil((new Date(itinerary.endDate) - new Date(itinerary.startDate)) / (1000 * 60 * 60 * 24)) + 1} days
-
-`;
-        }
-        
-        contextPrompt += `USER QUESTION: ${message.trim()}
-
-Please provide a helpful, specific response:`;
-        
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const result = await model.generateContent(contextPrompt);
-        const response = await result.response;
-        aiResponse = response.text();
-        
-        useAI = true;
-        console.log('Gemini response received successfully');
-        
-      } catch (geminiError) {
-        console.error('Gemini API error:', {
-          message: geminiError.message,
-          status: geminiError.status
-        });
-        
-        aiResponse = generateIntelligentMockResponse(message, user, itinerary);
-        console.log('Using mock response due to Gemini error');
-      }
-    } else {
-      if (!hasValidKey) {
-        console.log('No valid Gemini key, using mock response');
-      } else if (!withinRateLimit) {
-        console.log('Rate limited, using mock response');
-      }
-      aiResponse = generateIntelligentMockResponse(message, user, itinerary);
-    }
-    
-    // Handle empty itineraryId for database save
-    const chatItineraryId = (itineraryId && itineraryId !== '' && itineraryId !== 'undefined' && itineraryId.length === 24) 
-      ? itineraryId 
-      : null;
-    
-    // Save chat history
-    let chat = await Chat.findOne({ 
-      userId, 
-      itineraryId: chatItineraryId 
-    });
-    
-    if (!chat) {
-      chat = new Chat({
-        userId,
-        itineraryId: chatItineraryId,
-        messages: [],
-      });
-    }
-    
-    // Limit chat history to prevent database bloat
-    if (chat.messages.length > 50) {
-      chat.messages = chat.messages.slice(-48);
-    }
-    
-    chat.messages.push(
-      { role: 'user', content: message.trim() },
-      { role: 'assistant', content: aiResponse }
-    );
-    
-    await chat.save();
-    
-    res.json({ 
-      response: aiResponse,
-      aiPowered: useAI,
-      provider: useAI ? 'gemini' : 'mock'
+    res.status(501).json({ 
+      message: 'Profile picture upload not implemented yet',
+      note: 'This would typically handle file upload with multer and cloud storage'
     });
     
   } catch (error) {
-    console.error('Chat service error:', error);
-    res.status(500).json({ 
-      message: 'Chat service error', 
-      response: 'I apologize, but I am having trouble right now. Please try again in a moment.',
-      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
-    });
+    console.error('Profile picture upload error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-app.get('/api/chat-history/:itineraryId?', authenticateToken, async (req, res) => {
+// ===== BULK USER STATS UPDATE ROUTE (Admin/Maintenance) =====
+app.post('/api/admin/update-user-stats', authenticateToken, async (req, res) => {
   try {
-    const { itineraryId } = req.params;
-    const query = { userId: req.user.userId };
+    // This would be an admin-only route in a real implementation
+    const users = await User.find({}).select('_id');
     
-    // Handle empty or invalid itineraryId
-    if (itineraryId && itineraryId !== 'undefined' && itineraryId !== '' && itineraryId.length === 24) {
-      query.itineraryId = itineraryId;
-    } else {
-      query.itineraryId = null;
+    for (const user of users) {
+      await updateUserStats(user._id);
     }
     
-    const chat = await Chat.findOne(query);
-    res.json(chat ? chat.messages : []);
+    res.json({ 
+      success: true, 
+      message: `Updated stats for ${users.length} users` 
+    });
+    
   } catch (error) {
-    console.error('Chat history error:', error);
+    console.error('Bulk user stats update error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 // ===== HEALTH CHECK =====
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Travel Planner API is running' });
+  res.json({ 
+    status: 'OK', 
+    message: 'Travel Planner API is running',
+    features: {
+      ai: !!process.env.GEMINI_API_KEY,
+      photos: {
+        unsplash: !!process.env.UNSPLASH_ACCESS_KEY,
+        pexels: !!process.env.PEXELS_API_KEY,
+        pixabay: !!process.env.PIXABAY_API_KEY
+      }
+    }
+  });
 });
 
 // ===== START SERVER =====
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log('Photo services configured:');
+  console.log('- Unsplash:', !!process.env.UNSPLASH_ACCESS_KEY ? '✅' : '❌');
+  console.log('- Pexels:', !!process.env.PEXELS_API_KEY ? '✅' : '❌');
+  console.log('- Pixabay:', !!process.env.PIXABAY_API_KEY ? '✅' : '❌');
+  console.log('- Gemini AI:', !!process.env.GEMINI_API_KEY ? '✅' : '❌');
 });
 
 module.exports = app;
