@@ -2314,34 +2314,163 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
     }
     
     // Get user preferences for context
-    const user = await User.findById(req.user.userId);
-    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    const user = await User.findById(userId);
+    let itinerary = null;
     
-    if (!isMatch) {
-      return res.status(400).json({ message: 'Current password is incorrect' });
+    // Handle empty itineraryId properly
+    if (itineraryId && itineraryId !== 'undefined' && itineraryId !== '' && itineraryId.length === 24) {
+      try {
+        itinerary = await Itinerary.findById(itineraryId);
+      } catch (err) {
+        console.log('Invalid itinerary ID, proceeding without itinerary context');
+      }
     }
     
-    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+    let aiResponse;
+    let useAI = false;
     
-    await User.findByIdAndUpdate(req.user.userId, {
-      password: hashedNewPassword,
-      updatedAt: Date.now()
+    // Check if we should try Gemini API
+    const hasValidKey = process.env.GEMINI_API_KEY && 
+                       process.env.GEMINI_API_KEY;
+    
+    const withinRateLimit = rateLimiter.isAllowed(userId);
+    
+    if (hasValidKey && withinRateLimit && genAI) {
+      try {
+        console.log('Attempting Gemini API call...');
+        
+        // Build context prompt
+        let contextPrompt = `You are an expert travel planning assistant. Help users plan amazing trips with personalized recommendations.
+
+INSTRUCTIONS:
+- Provide specific, actionable travel advice
+- Include practical tips and local insights
+- Be enthusiastic but concise
+- Use emojis to make responses engaging
+- Focus on the user's specific question
+
+`;
+        
+        // Add user context
+        if (user?.preferences) {
+          const interests = user.preferences.interests?.join(', ') || 'general travel';
+          const budget = user.preferences.budget || 'flexible';
+          const travelStyle = user.preferences.travelStyle || 'flexible';
+          contextPrompt += `USER PREFERENCES:
+- Interests: ${interests}
+- Budget: ${budget}
+- Travel style: ${travelStyle}
+
+`;
+        }
+        
+        // Add itinerary context
+        if (itinerary) {
+          contextPrompt += `CURRENT TRIP CONTEXT:
+- Destination: ${itinerary.destination}
+- Dates: ${new Date(itinerary.startDate).toDateString()} to ${new Date(itinerary.endDate).toDateString()}
+- Duration: ${Math.ceil((new Date(itinerary.endDate) - new Date(itinerary.startDate)) / (1000 * 60 * 60 * 24)) + 1} days
+
+`;
+        }
+        
+        contextPrompt += `USER QUESTION: ${message.trim()}
+
+Please provide a helpful, specific response:`;
+        
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const result = await model.generateContent(contextPrompt);
+        const response = await result.response;
+        aiResponse = response.text();
+        
+        useAI = true;
+        console.log('Gemini response received successfully');
+        
+      } catch (geminiError) {
+        console.error('Gemini API error:', {
+          message: geminiError.message,
+          status: geminiError.status
+        });
+        
+        aiResponse = generateIntelligentMockResponse(message, user, itinerary);
+        console.log('Using mock response due to Gemini error');
+      }
+    } else {
+      if (!hasValidKey) {
+        console.log('No valid Gemini key, using mock response');
+      } else if (!withinRateLimit) {
+        console.log('Rate limited, using mock response');
+      }
+      aiResponse = generateIntelligentMockResponse(message, user, itinerary);
+    }
+    
+    // Handle empty itineraryId for database save
+    const chatItineraryId = (itineraryId && itineraryId !== '' && itineraryId !== 'undefined' && itineraryId.length === 24) 
+      ? itineraryId 
+      : null;
+    
+    // Save chat history
+    let chat = await Chat.findOne({ 
+      userId, 
+      itineraryId: chatItineraryId 
     });
     
-    await new UserActivity({
-      userId: req.user.userId,
-      type: 'password_changed',
-      title: 'Password changed',
-      description: 'Account password has been updated',
-    }).save();
+    if (!chat) {
+      chat = new Chat({
+        userId,
+        itineraryId: chatItineraryId,
+        messages: [],
+      });
+    }
     
-    res.json({ success: true, message: 'Password changed successfully' });
+    // Limit chat history to prevent database bloat
+    if (chat.messages.length > 50) {
+      chat.messages = chat.messages.slice(-48);
+    }
+    
+    chat.messages.push(
+      { role: 'user', content: message.trim() },
+      { role: 'assistant', content: aiResponse }
+    );
+    
+    await chat.save();
+    
+    res.json({ 
+      response: aiResponse,
+      aiPowered: useAI,
+      provider: useAI ? 'gemini' : 'mock'
+    });
     
   } catch (error) {
-    console.error('Password change error:', error);
+    console.error('Chat service error:', error);
+    res.status(500).json({ 
+      message: 'Chat service error', 
+      response: 'I apologize, but I am having trouble right now. Please try again in a moment.',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+});
+
+app.get('/api/chat-history/:itineraryId?', authenticateToken, async (req, res) => {
+  try {
+    const { itineraryId } = req.params;
+    const query = { userId: req.user.userId };
+    
+    // Handle empty or invalid itineraryId
+    if (itineraryId && itineraryId !== 'undefined' && itineraryId !== '' && itineraryId.length === 24) {
+      query.itineraryId = itineraryId;
+    } else {
+      query.itineraryId = null;
+    }
+    
+    const chat = await Chat.findOne(query);
+    res.json(chat ? chat.messages : []);
+  } catch (error) {
+    console.error('Chat history error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
+
 
 app.put('/api/users/two-factor', authenticateToken, async (req, res) => {
   try {
