@@ -849,6 +849,72 @@ function sanitizeDuration(duration) {
   return '2 hours';
 }
 
+function sanitizeActivityForSchema(activity) {
+  return {
+    time: activity.time || '09:00',
+    activity: activity.activity || 'Explore local area',
+    location: activity.location || 'City center',
+    duration: activity.duration || '2 hours',
+    cost: typeof activity.cost === 'number' ? activity.cost : 0,
+    notes: activity.notes || '',
+    // Photo fields - ensure they're either null or proper objects
+    photo: activity.photo && activity.photo.url ? {
+      id: activity.photo.id || '',
+      url: activity.photo.url || '',
+      thumb: activity.photo.thumb || '',
+      description: activity.photo.description || '',
+      photographer: activity.photo.photographer || '',
+      photographerUrl: activity.photo.photographerUrl || '',
+      source: activity.photo.source || ''
+    } : null,
+    fallbackPhoto: activity.fallbackPhoto && activity.fallbackPhoto.url ? {
+      id: activity.fallbackPhoto.id || '',
+      url: activity.fallbackPhoto.url || '',
+      thumb: activity.fallbackPhoto.thumb || '',
+      description: activity.fallbackPhoto.description || '',
+      photographer: activity.fallbackPhoto.photographer || '',
+      photographerUrl: activity.fallbackPhoto.photographerUrl || '',
+      source: activity.fallbackPhoto.source || ''
+    } : null
+  };
+}
+
+function sanitizeDayForSchema(day) {
+  return {
+    date: day.date || new Date().toISOString().split('T')[0],
+    activities: Array.isArray(day.activities) 
+      ? day.activities.map(activity => sanitizeActivityForSchema(activity))
+      : [],
+    // Day photo - ensure it's either null or proper object
+    dayPhoto: day.dayPhoto && day.dayPhoto.url ? {
+      id: day.dayPhoto.id || '',
+      url: day.dayPhoto.url || '',
+      thumb: day.dayPhoto.thumb || '',
+      description: day.dayPhoto.description || '',
+      photographer: day.dayPhoto.photographer || '',
+      photographerUrl: day.dayPhoto.photographerUrl || '',
+      source: day.dayPhoto.source || ''
+    } : null
+  };
+}
+
+// Helper function to sanitize destination photos
+function sanitizeDestinationPhotosForSchema(photos) {
+  if (!Array.isArray(photos)) {
+    return [];
+  }
+  
+  return photos.map(photo => ({
+    id: photo.id || '',
+    url: photo.url || '',
+    thumb: photo.thumb || '',
+    description: photo.description || '',
+    photographer: photo.photographer || '',
+    photographerUrl: photo.photographerUrl || '',
+    source: photo.source || ''
+  })).filter(photo => photo.url); // Only keep photos with URLs
+}
+
 // Enhanced AI response cleaning and parsing
 function cleanAndParseAIResponse(aiResponse) {
   logger.info('🧹 Cleaning AI response for JSON parsing');
@@ -1087,7 +1153,7 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
 
 // Enhanced sanitization function that includes photos
 async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr) {
-  logger.info('🧹 Sanitizing AI itinerary data with photos', { destination, expectedDays });
+  logger.info('🧹 Sanitizing AI itinerary with schema compliance', { destination, expectedDays });
   
   // First get the basic sanitized itinerary
   const basicItinerary = sanitizeAIItinerary(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr);
@@ -1097,126 +1163,65 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
     return null;
   }
   
-  logger.info('📸 Starting photo generation process');
+  // Get destination photos
+  const destinationPhotos = await fetchPhotosForDestination(destination, null, 5)
+    .catch(error => {
+      logger.error('❌ Error fetching destination photos:', error);
+      return [];
+    });
   
-  // Get destination photos with retry logic
-  let destinationPhotos = [];
-  let photoAttempts = 0;
-  const maxPhotoAttempts = 3;
+  // Sanitize destination photos for schema
+  const sanitizedDestinationPhotos = sanitizeDestinationPhotosForSchema(destinationPhotos);
   
-  while (destinationPhotos.length === 0 && photoAttempts < maxPhotoAttempts) {
-    photoAttempts++;
-    logger.info(`📸 Attempt ${photoAttempts} to fetch destination photos`);
-    
-    try {
-      destinationPhotos = await fetchPhotosForDestination(destination, null, 5);
-      if (destinationPhotos.length > 0) {
-        logger.info('✅ Destination photos fetched successfully', { count: destinationPhotos.length });
-        break;
-      }
-    } catch (error) {
-      logger.error(`❌ Photo fetch attempt ${photoAttempts} failed:`, error);
-    }
-    
-    // Wait before retry
-    if (photoAttempts < maxPhotoAttempts) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-  }
-  
-  if (destinationPhotos.length === 0) {
-    logger.error('❌ Failed to fetch any destination photos after all attempts');
-    // Don't use placeholder photos, just continue without photos
-  }
-  
-  // Add photos to each day and activity
+  // Process days with proper schema structure
   const enhancedDays = await Promise.all(
     basicItinerary.days.map(async (day, dayIndex) => {
-      logger.info(`📸 Processing day ${dayIndex + 1}/${basicItinerary.days.length}`);
+      logger.info(`📸 Processing day ${dayIndex + 1} with schema compliance`);
       
-      // Add photos to each activity with better error handling
       const enhancedActivities = await Promise.all(
         day.activities.map(async (activity, activityIndex) => {
-          logger.info(`📸 Processing activity ${activityIndex + 1}/${day.activities.length}: ${activity.activity}`);
-          
           try {
-            // Get activity-specific photo with timeout
-            const photoPromise = getActivityPhotos(destination, activity.activity, activity.location);
-            const timeoutPromise = new Promise((resolve) => 
-              setTimeout(() => resolve(null), 8000) // 8 second timeout
-            );
+            // Get activity photo
+            const activityPhoto = await getActivityPhotos(destination, activity.activity, activity.location)
+              .catch(() => null);
             
-            const activityPhoto = await Promise.race([photoPromise, timeoutPromise]);
-            
-            const enhancedActivity = {
+            // Create properly structured activity
+            return sanitizeActivityForSchema({
               ...activity,
-              photo: activityPhoto && activityPhoto.url ? activityPhoto : null,
-              fallbackPhoto: (!activityPhoto || !activityPhoto.url) && destinationPhotos.length > 0 
-                ? destinationPhotos[activityIndex % destinationPhotos.length] 
-                : null
-            };
-            
-            if (activityPhoto && activityPhoto.url) {
-              logger.info('✅ Activity photo added', { 
-                activity: activity.activity, 
-                photoSource: activityPhoto.source,
-                photoUrl: activityPhoto.url.substring(0, 50) + '...'
-              });
-            } else {
-              logger.warn('⚠️ No activity photo found, using fallback', { 
-                activity: activity.activity,
-                hasFallback: !!enhancedActivity.fallbackPhoto
-              });
-            }
-            
-            return enhancedActivity;
-            
+              photo: activityPhoto,
+              fallbackPhoto: !activityPhoto ? sanitizedDestinationPhotos[activityIndex % sanitizedDestinationPhotos.length] : null
+            });
           } catch (error) {
             logger.error(`❌ Error processing activity ${activityIndex}:`, error);
-            return {
+            return sanitizeActivityForSchema({
               ...activity,
               photo: null,
-              fallbackPhoto: destinationPhotos.length > 0 
-                ? destinationPhotos[activityIndex % destinationPhotos.length] 
-                : null
-            };
+              fallbackPhoto: sanitizedDestinationPhotos[activityIndex % sanitizedDestinationPhotos.length] || null
+            });
           }
         })
       );
       
-      return {
+      // Create properly structured day
+      return sanitizeDayForSchema({
         ...day,
         activities: enhancedActivities,
-        dayPhoto: destinationPhotos.length > 0 
-          ? destinationPhotos[dayIndex % destinationPhotos.length] 
-          : null
-      };
+        dayPhoto: sanitizedDestinationPhotos[dayIndex % sanitizedDestinationPhotos.length] || null
+      });
     })
   );
   
   const finalResult = {
     ...basicItinerary,
     days: enhancedDays,
-    destinationPhotos: destinationPhotos.slice(0, 3),
+    destinationPhotos: sanitizedDestinationPhotos.slice(0, 3),
     photosEnabled: true
   };
   
-  // Count successful photo assignments
-  const photoStats = {
-    totalActivities: enhancedDays.reduce((sum, day) => sum + day.activities.length, 0),
-    activitiesWithPhotos: enhancedDays.reduce((sum, day) => 
-      sum + day.activities.filter(act => act.photo && act.photo.url).length, 0
-    ),
-    activitiesWithFallback: enhancedDays.reduce((sum, day) => 
-      sum + day.activities.filter(act => !act.photo && act.fallbackPhoto && act.fallbackPhoto.url).length, 0
-    ),
-    destinationPhotos: destinationPhotos.length
-  };
-  
-  logger.info('✅ AI itinerary with photos sanitization complete', { 
+  logger.info('✅ AI itinerary sanitized with schema compliance', { 
     destination, 
     daysGenerated: enhancedDays.length,
-    photoStats
+    destinationPhotos: sanitizedDestinationPhotos.length
   });
   
   return finalResult;
@@ -2433,14 +2438,15 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.userId;
-    const updates = { ...req.body, updatedAt: Date.now() };
+    const updates = { ...req.body };
     
-    logger.info('✏️ Updating itinerary', { 
+    logger.info('✏️ Updating itinerary with schema validation', { 
       itineraryId: id, 
       userId, 
       hasDestination: !!updates.destination,
       hasStartDate: !!updates.startDate,
-      hasEndDate: !!updates.endDate
+      hasEndDate: !!updates.endDate,
+      hasDays: !!updates.days
     });
     
     // Validate itinerary ID
@@ -2463,11 +2469,25 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
     logger.info('📋 Found existing itinerary', { 
       title: existingItinerary.title,
       destination: existingItinerary.destination,
-      photosEnabled: existingItinerary.photosEnabled
+      photosEnabled: existingItinerary.photosEnabled,
+      daysCount: existingItinerary.days?.length || 0
     });
     
+    // Prepare the update object with proper schema structure
+    const updateData = {
+      updatedAt: new Date()
+    };
+    
+    // Handle basic fields
+    if (updates.title) updateData.title = updates.title;
+    if (updates.destination) updateData.destination = updates.destination;
+    if (updates.startDate) updateData.startDate = new Date(updates.startDate);
+    if (updates.endDate) updateData.endDate = new Date(updates.endDate);
+    if (updates.budget) updateData.budget = updates.budget;
+    if (updates.preferences) updateData.preferences = updates.preferences;
+    
     // Check if destination has changed
-    const destinationChanged = existingItinerary.destination !== updates.destination;
+    const destinationChanged = updates.destination && existingItinerary.destination !== updates.destination;
     
     // Update title if destination changed
     if (destinationChanged) {
@@ -2477,46 +2497,35 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
       });
       
       const aiGenerated = existingItinerary.aiGenerated;
-      updates.title = `${aiGenerated ? 'AI-Generated' : 'Custom'} Trip to ${updates.destination}`;
+      updateData.title = `${aiGenerated ? 'AI-Generated' : 'Custom'} Trip to ${updates.destination}`;
     }
     
     // Check if dates have changed
     let datesChanged = false;
-    let oldStartDate = null;
-    let newStartDate = null;
-    let oldEndDate = null;
-    let newEndDate = null;
-    
-    try {
-      oldStartDate = new Date(existingItinerary.startDate).toISOString().split('T')[0];
-      newStartDate = new Date(updates.startDate).toISOString().split('T')[0];
-      oldEndDate = new Date(existingItinerary.endDate).toISOString().split('T')[0];
-      newEndDate = new Date(updates.endDate).toISOString().split('T')[0];
-      
-      datesChanged = oldStartDate !== newStartDate || oldEndDate !== newEndDate;
-    } catch (dateError) {
-      logger.error('❌ Error parsing dates:', dateError);
-      datesChanged = false;
+    if (updates.startDate && updates.endDate) {
+      try {
+        const oldStartDate = new Date(existingItinerary.startDate).toISOString().split('T')[0];
+        const newStartDate = new Date(updates.startDate).toISOString().split('T')[0];
+        const oldEndDate = new Date(existingItinerary.endDate).toISOString().split('T')[0];
+        const newEndDate = new Date(updates.endDate).toISOString().split('T')[0];
+        
+        datesChanged = oldStartDate !== newStartDate || oldEndDate !== newEndDate;
+      } catch (dateError) {
+        logger.error('❌ Error parsing dates:', dateError);
+        datesChanged = false;
+      }
     }
     
-    if (datesChanged) {
-      logger.info('📅 Dates changed, updating day structure', { 
-        oldStartDate, 
-        newStartDate, 
-        oldEndDate, 
-        newEndDate 
-      });
+    // Handle days array update
+    if (updates.days || datesChanged) {
+      logger.info('📅 Updating days array', { datesChanged, hasDaysInUpdate: !!updates.days });
       
-      try {
-        // Calculate new duration
-        const newDuration = Math.ceil((new Date(newEndDate) - new Date(newStartDate)) / (1000 * 60 * 60 * 24)) + 1;
-        const oldDuration = existingItinerary.days ? existingItinerary.days.length : 0;
-        
-        logger.info('📊 Duration calculation', { oldDuration, newDuration });
-        
-        // Update the days array to match new dates
-        const updatedDays = [];
-        const startDate = new Date(newStartDate + 'T00:00:00');
+      let daysToUpdate = [];
+      
+      if (datesChanged && updates.startDate && updates.endDate) {
+        // Recalculate days based on new dates
+        const newDuration = Math.ceil((new Date(updates.endDate) - new Date(updates.startDate)) / (1000 * 60 * 60 * 24)) + 1;
+        const startDate = new Date(updates.startDate);
         
         for (let i = 0; i < newDuration; i++) {
           const currentDate = new Date(startDate);
@@ -2527,33 +2536,53 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
           let dayActivities = [];
           let dayPhoto = null;
           
-          if (i < oldDuration && existingItinerary.days[i]) {
+          if (i < existingItinerary.days.length && existingItinerary.days[i]) {
             dayActivities = existingItinerary.days[i].activities || [];
             dayPhoto = existingItinerary.days[i].dayPhoto || null;
           }
           
-          updatedDays.push({
+          daysToUpdate.push({
             date: dateStr,
             activities: dayActivities,
             dayPhoto: dayPhoto
           });
         }
-        
-        updates.days = updatedDays;
-        logger.info('✅ Days array updated successfully', { daysCount: updatedDays.length });
-        
-      } catch (daysError) {
-        logger.error('❌ Error updating days array:', daysError);
-        // Continue without updating days if there's an error
+      } else if (updates.days) {
+        // Use provided days
+        daysToUpdate = updates.days;
+      } else {
+        // Keep existing days
+        daysToUpdate = existingItinerary.days || [];
       }
+      
+      // Sanitize days to match schema
+      updateData.days = daysToUpdate.map(day => sanitizeDayForSchema(day));
+      
+      logger.info('✅ Days array prepared for update', { 
+        daysCount: updateData.days.length,
+        sampleDay: updateData.days[0] ? {
+          date: updateData.days[0].date,
+          activitiesCount: updateData.days[0].activities.length
+        } : null
+      });
     }
     
-    // Handle destination change - regenerate photos if photos are enabled
-    if (destinationChanged && existingItinerary.photosEnabled) {
-      logger.info('📸 Starting photo regeneration for new destination', { 
-        oldDestination: existingItinerary.destination,
-        newDestination: updates.destination 
+    // Handle destination photos
+    if (updates.destinationPhotos) {
+      updateData.destinationPhotos = sanitizeDestinationPhotosForSchema(updates.destinationPhotos);
+      logger.info('📸 Destination photos prepared for update', { 
+        photosCount: updateData.destinationPhotos.length 
       });
+    }
+    
+    // Handle photos enabled flag
+    if (updates.hasOwnProperty('photosEnabled')) {
+      updateData.photosEnabled = !!updates.photosEnabled;
+    }
+    
+    // Handle destination change - regenerate photos if needed
+    if (destinationChanged && existingItinerary.photosEnabled) {
+      logger.info('📸 Starting photo regeneration for new destination');
       
       try {
         // Check if photo services are available
@@ -2563,9 +2592,7 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
           process.env.PIXABAY_API_KEY
         );
         
-        if (!photoServicesAvailable) {
-          logger.warn('⚠️ No photo services available, skipping photo regeneration');
-        } else {
+        if (photoServicesAvailable) {
           // Get new destination photos with timeout
           const photoPromise = fetchPhotosForDestination(updates.destination, null, 5);
           const timeoutPromise = new Promise((_, reject) => 
@@ -2575,90 +2602,100 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
           const newDestinationPhotos = await Promise.race([photoPromise, timeoutPromise])
             .catch(photoError => {
               logger.error('❌ Photo fetch failed:', photoError);
-              return []; // Return empty array on error
+              return [];
             });
           
           if (newDestinationPhotos.length > 0) {
             logger.info('✅ New destination photos fetched', { count: newDestinationPhotos.length });
             
             // Update destination photos
-            updates.destinationPhotos = newDestinationPhotos.slice(0, 3);
+            updateData.destinationPhotos = sanitizeDestinationPhotosForSchema(newDestinationPhotos.slice(0, 3));
             
-            // Update day and activity photos
-            const currentDays = updates.days || existingItinerary.days || [];
-            
-            const enhancedDays = await Promise.all(
-              currentDays.map(async (day, dayIndex) => {
-                const enhancedActivities = await Promise.all(
-                  (day.activities || []).map(async (activity, activityIndex) => {
-                    try {
-                      // Get new activity-specific photo for the new destination
-                      const photoPromise = getActivityPhotos(updates.destination, activity.activity, activity.location);
-                      const timeoutPromise = new Promise((_, reject) => 
-                        setTimeout(() => reject(new Error('Activity photo timeout')), 5000)
-                      );
-                      
-                      const newActivityPhoto = await Promise.race([photoPromise, timeoutPromise])
-                        .catch(() => null); // Return null on error
-                      
-                      return {
-                        ...activity,
-                        photo: newActivityPhoto,
-                        fallbackPhoto: newActivityPhoto ? null : newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
-                      };
-                    } catch (activityPhotoError) {
-                      logger.error(`❌ Error updating activity photo ${activityIndex}:`, activityPhotoError);
-                      return {
-                        ...activity,
-                        photo: null,
-                        fallbackPhoto: newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
-                      };
-                    }
-                  })
-                );
-                
-                return {
-                  ...day,
-                  activities: enhancedActivities,
-                  dayPhoto: newDestinationPhotos[dayIndex % newDestinationPhotos.length] || null
-                };
-              })
-            );
-            
-            updates.days = enhancedDays;
-            logger.info('✅ Photos regenerated successfully', { 
-              newDestination: updates.destination,
-              photoCount: newDestinationPhotos.length 
-            });
-          } else {
-            logger.warn('⚠️ No photos found for new destination, keeping existing structure');
+            // Update activity photos in days array
+            if (updateData.days) {
+              logger.info('🔄 Updating activity photos');
+              
+              updateData.days = await Promise.all(
+                updateData.days.map(async (day, dayIndex) => {
+                  const enhancedActivities = await Promise.all(
+                    day.activities.map(async (activity, activityIndex) => {
+                      try {
+                        // Get new activity-specific photo
+                        const photoPromise = getActivityPhotos(updates.destination, activity.activity, activity.location);
+                        const timeoutPromise = new Promise((resolve) => 
+                          setTimeout(() => resolve(null), 5000)
+                        );
+                        
+                        const newActivityPhoto = await Promise.race([photoPromise, timeoutPromise])
+                          .catch(() => null);
+                        
+                        return sanitizeActivityForSchema({
+                          ...activity,
+                          photo: newActivityPhoto,
+                          fallbackPhoto: !newActivityPhoto ? newDestinationPhotos[activityIndex % newDestinationPhotos.length] : null
+                        });
+                      } catch (error) {
+                        logger.error(`❌ Error updating activity photo ${activityIndex}:`, error);
+                        return sanitizeActivityForSchema({
+                          ...activity,
+                          photo: null,
+                          fallbackPhoto: newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
+                        });
+                      }
+                    })
+                  );
+                  
+                  return sanitizeDayForSchema({
+                    ...day,
+                    activities: enhancedActivities,
+                    dayPhoto: newDestinationPhotos[dayIndex % newDestinationPhotos.length] || null
+                  });
+                })
+              );
+              
+              logger.info('✅ Activity photos updated successfully');
+            }
           }
         }
-        
       } catch (photoError) {
-        logger.error('❌ Error regenerating photos for new destination:', photoError);
+        logger.error('❌ Error regenerating photos:', photoError);
         // Continue with update even if photo regeneration fails
       }
     }
     
     // Update the itinerary in database
-    logger.info('💾 Updating itinerary in database');
+    logger.info('💾 Updating itinerary in database', { 
+      updateFields: Object.keys(updateData),
+      daysCount: updateData.days?.length
+    });
     
     const itinerary = await Itinerary.findOneAndUpdate(
       { _id: id, userId },
-      updates,
-      { new: true, runValidators: true }
+      updateData,
+      { 
+        new: true, 
+        runValidators: true,
+        // Ensure we handle validation errors properly
+        context: 'query'
+      }
     ).catch(updateError => {
       logger.error('❌ Database update error:', updateError);
-      throw new Error(`Database update failed: ${updateError.message}`);
+      
+      if (updateError.name === 'CastError') {
+        throw new Error(`Invalid data format: ${updateError.message}`);
+      } else if (updateError.name === 'ValidationError') {
+        throw new Error(`Validation failed: ${updateError.message}`);
+      } else {
+        throw new Error(`Database update failed: ${updateError.message}`);
+      }
     });
     
     if (!itinerary) {
-      logger.warn('⚠️ Itinerary update failed - not found after update', { itineraryId: id, userId });
+      logger.warn('⚠️ Itinerary not found after update', { itineraryId: id, userId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
-    // Log activity with more details
+    // Log activity
     try {
       const activityDescription = [];
       if (destinationChanged) {
@@ -2684,12 +2721,10 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
           datesChanged,
           photosRegenerated: destinationChanged && existingItinerary.photosEnabled
         }
-      }).save().catch(activityError => {
-        logger.error('❌ Error saving user activity:', activityError);
-        // Don't fail the request if activity logging fails
-      });
+      }).save();
     } catch (activityError) {
-      logger.error('❌ Error creating user activity:', activityError);
+      logger.error('❌ Error saving user activity:', activityError);
+      // Don't fail the request if activity logging fails
     }
     
     logger.info('✅ Itinerary updated successfully', { 
@@ -2706,6 +2741,13 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
     logger.error('❌ Itinerary update error:', error);
     
     // Return appropriate error response
+    if (error.message.includes('Cast to embedded failed')) {
+      return res.status(400).json({ 
+        message: 'Invalid data structure',
+        error: 'The data format does not match the expected structure. Please try again.'
+      });
+    }
+    
     if (error.name === 'ValidationError') {
       return res.status(400).json({ 
         message: 'Validation error',
@@ -2716,7 +2758,7 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
     if (error.name === 'CastError') {
       return res.status(400).json({ 
         message: 'Invalid data format',
-        error: 'Invalid itinerary ID or data format' 
+        error: 'Invalid data format provided' 
       });
     }
     
