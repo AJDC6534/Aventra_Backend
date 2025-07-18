@@ -359,44 +359,73 @@ async function getActivityPhotos(destination, activity, location) {
   logger.info('📸 Getting activity-specific photos', { destination, activity, location });
   
   try {
+    // Create multiple search queries for better results
+    const searchQueries = [
+      `${activity} ${destination}`,
+      `${location} ${destination}`,
+      `${activity} ${location}`,
+      activity,
+      destination
+    ].filter(q => q && q.trim());
+    
     // Extract activity type for better photo search
     const activityLower = activity.toLowerCase();
     let activityType = '';
     
-    if (activityLower.includes('museum') || activityLower.includes('gallery')) {
+    // Enhanced activity type detection
+    if (activityLower.includes('museum') || activityLower.includes('gallery') || activityLower.includes('exhibit')) {
       activityType = 'museum';
-    } else if (activityLower.includes('temple') || activityLower.includes('shrine') || activityLower.includes('church')) {
+    } else if (activityLower.includes('temple') || activityLower.includes('shrine') || activityLower.includes('church') || activityLower.includes('cathedral')) {
       activityType = 'temple';
-    } else if (activityLower.includes('market') || activityLower.includes('shopping')) {
+    } else if (activityLower.includes('market') || activityLower.includes('shopping') || activityLower.includes('bazaar')) {
       activityType = 'market';
-    } else if (activityLower.includes('park') || activityLower.includes('garden')) {
+    } else if (activityLower.includes('park') || activityLower.includes('garden') || activityLower.includes('botanical')) {
       activityType = 'park';
-    } else if (activityLower.includes('restaurant') || activityLower.includes('food') || activityLower.includes('dining')) {
+    } else if (activityLower.includes('restaurant') || activityLower.includes('food') || activityLower.includes('dining') || activityLower.includes('cafe')) {
       activityType = 'food';
-    } else if (activityLower.includes('beach')) {
+    } else if (activityLower.includes('beach') || activityLower.includes('shore') || activityLower.includes('coast')) {
       activityType = 'beach';
-    } else if (activityLower.includes('mountain') || activityLower.includes('hiking')) {
+    } else if (activityLower.includes('mountain') || activityLower.includes('hiking') || activityLower.includes('trek')) {
       activityType = 'mountain';
+    } else if (activityLower.includes('historic') || activityLower.includes('heritage') || activityLower.includes('monument')) {
+      activityType = 'historic';
+    } else if (activityLower.includes('view') || activityLower.includes('scenic') || activityLower.includes('lookout')) {
+      activityType = 'scenic';
     }
     
-    // Try specific location first, then fall back to destination
-    const searchQueries = [
-      location,
-      `${destination} ${activityType}`,
-      `${destination} ${activity}`,
-      destination
-    ].filter(q => q && q.trim());
+    // Try multiple search approaches
+    const searchAttempts = [
+      { query: searchQueries[0], priority: 1 },
+      { query: searchQueries[1], priority: 2 },
+      { query: `${destination} ${activityType}`, priority: 3 },
+      { query: searchQueries[2], priority: 4 },
+      { query: destination, priority: 5 }
+    ].filter(attempt => attempt.query && attempt.query.trim());
     
-    for (const query of searchQueries) {
-      const photos = await fetchPhotosForDestination(query, null, 1);
-      if (photos.length > 0) {
-        logger.info('✅ Activity photo found', { activity, query, photoFound: true });
-        return photos[0];
+    for (const attempt of searchAttempts) {
+      logger.debug(`📸 Trying search query: "${attempt.query}" (priority ${attempt.priority})`);
+      
+      try {
+        const photos = await fetchPhotosForDestination(attempt.query, null, 1);
+        
+        if (photos.length > 0) {
+          logger.info('✅ Activity photo found', { 
+            activity, 
+            query: attempt.query, 
+            priority: attempt.priority,
+            photoSource: photos[0].source
+          });
+          return photos[0];
+        }
+      } catch (searchError) {
+        logger.warn(`⚠️ Search attempt failed for "${attempt.query}":`, searchError.message);
+        continue;
       }
     }
     
-    logger.warn('⚠️ No activity photo found', { activity, location });
+    logger.warn('⚠️ No activity photo found after all attempts', { activity, location, destination });
     return null;
+    
   } catch (error) {
     logger.error('❌ Error getting activity photos:', error);
     return null;
@@ -1134,7 +1163,8 @@ app.get('/api/photos/activity', authenticateToken, async (req, res) => {
       destination,
       activity,
       location,
-      photo
+      photo,
+      fallbackAvailable: !photo // Indicate if frontend should use fallback
     });
     
   } catch (error) {
@@ -2632,36 +2662,105 @@ app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) 
     
     logger.info(`📸 Adding photos to existing itinerary: ${itinerary.title}`);
     
-    // Get destination photos
-    const destinationPhotos = await fetchPhotosForDestination(itinerary.destination, null, 5);
+    // Get destination photos first
+    const destinationPhotos = await fetchPhotosForDestination(itinerary.destination, null, 8);
+    logger.info(`📸 Found ${destinationPhotos.length} destination photos`);
     
-    // Add photos to each day and activity
+    // Enhanced photo addition with better error handling
     const enhancedDays = await Promise.all(
       itinerary.days.map(async (day, dayIndex) => {
-        const enhancedActivities = await Promise.all(
-          day.activities.map(async (activity, activityIndex) => {
-            // Skip if photo already exists
-            if (activity.photo && activity.photo.url) {
-              return activity;
-            }
+        logger.debug(`📸 Processing day ${dayIndex + 1} with ${day.activities?.length || 0} activities`);
+        
+        if (!day.activities || day.activities.length === 0) {
+          return {
+            ...day,
+            dayPhoto: destinationPhotos[dayIndex % destinationPhotos.length] || null
+          };
+        }
+        
+        const enhancedActivities = [];
+        
+        for (let actIndex = 0; actIndex < day.activities.length; actIndex++) {
+          const activity = day.activities[actIndex];
+          
+          logger.debug(`📸 Processing activity: ${activity.activity}`);
+          
+          // Skip if photo already exists
+          if (activity.photo && activity.photo.url) {
+            logger.debug(`📸 Activity already has photo, skipping`);
+            enhancedActivities.push(activity);
+            continue;
+          }
+          
+          try {
+            // Try to get activity-specific photo
+            const activityPhoto = await getActivityPhotos(
+              itinerary.destination, 
+              activity.activity, 
+              activity.location
+            );
             
-            const activityPhoto = await getActivityPhotos(itinerary.destination, activity.activity, activity.location);
-            
-            return {
+            // Prepare enhanced activity
+            const enhancedActivity = {
               ...activity,
               photo: activityPhoto,
-              fallbackPhoto: activityPhoto ? null : destinationPhotos[activityIndex % destinationPhotos.length] || null
+              fallbackPhoto: activityPhoto ? null : destinationPhotos[actIndex % destinationPhotos.length] || null
             };
-          })
-        );
+            
+            enhancedActivities.push(enhancedActivity);
+            
+            logger.debug(`📸 Activity processed: ${activity.activity}`, {
+              hasPhoto: !!activityPhoto,
+              hasFallback: !!enhancedActivity.fallbackPhoto
+            });
+            
+            // Small delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+          } catch (error) {
+            logger.error(`❌ Error processing activity photo for "${activity.activity}":`, error);
+            
+            // Add activity with fallback photo
+            const enhancedActivity = {
+              ...activity,
+              photo: null,
+              fallbackPhoto: destinationPhotos[actIndex % destinationPhotos.length] || null
+            };
+            
+            enhancedActivities.push(enhancedActivity);
+          }
+        }
         
         return {
           ...day,
           activities: enhancedActivities,
-          dayPhoto: day.dayPhoto || destinationPhotos[dayIndex % destinationPhotos.length] || null
+          dayPhoto: destinationPhotos[dayIndex % destinationPhotos.length] || null
         };
       })
     );
+    
+    // Count successful photo additions
+    let activityPhotosCount = 0;
+    let fallbackPhotosCount = 0;
+    
+    enhancedDays.forEach(day => {
+      if (day.activities) {
+        day.activities.forEach(activity => {
+          if (activity.photo && activity.photo.url) {
+            activityPhotosCount++;
+          } else if (activity.fallbackPhoto && activity.fallbackPhoto.url) {
+            fallbackPhotosCount++;
+          }
+        });
+      }
+    });
+    
+    logger.info(`📸 Photo addition summary:`, {
+      destinationPhotos: destinationPhotos.length,
+      activityPhotos: activityPhotosCount,
+      fallbackPhotos: fallbackPhotosCount,
+      totalActivities: enhancedDays.reduce((total, day) => total + (day.activities?.length || 0), 0)
+    });
     
     // Update the itinerary
     const updatedItinerary = await Itinerary.findByIdAndUpdate(
@@ -2680,20 +2779,30 @@ app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) 
       userId,
       type: 'photos_added',
       title: 'Photos added to itinerary',
-      description: `Added photos to "${itinerary.title}"`,
+      description: `Added ${activityPhotosCount} activity photos and ${fallbackPhotosCount} fallback photos to "${itinerary.title}"`,
       icon: '📸',
       metadata: { 
         itineraryId: itinerary._id,
-        photoCount: destinationPhotos.length
+        destinationPhotos: destinationPhotos.length,
+        activityPhotos: activityPhotosCount,
+        fallbackPhotos: fallbackPhotosCount
       }
     }).save();
     
-    logger.info('✅ Photos added to itinerary successfully', { userId, itineraryId, photoCount: destinationPhotos.length });
+    logger.info('✅ Photos added to itinerary successfully', { 
+      userId, 
+      itineraryId, 
+      destinationPhotos: destinationPhotos.length,
+      activityPhotos: activityPhotosCount,
+      fallbackPhotos: fallbackPhotosCount
+    });
     
     res.json({
       success: true,
       message: 'Photos added successfully',
       photoCount: destinationPhotos.length,
+      activityPhotos: activityPhotosCount,
+      fallbackPhotos: fallbackPhotosCount,
       itinerary: updatedItinerary
     });
     
@@ -2705,6 +2814,7 @@ app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) 
     });
   }
 });
+
 
 // ===== REFRESH SINGLE ACTIVITY PHOTO ROUTE =====
 app.post('/api/itineraries/:id/days/:dayIndex/activities/:activityIndex/refresh-photo', authenticateToken, async (req, res) => {
@@ -2734,8 +2844,35 @@ app.post('/api/itineraries/:id/days/:dayIndex/activities/:activityIndex/refresh-
     
     const activity = itinerary.days[dayIdx].activities[actIdx];
     
-    // Get new photo for this activity
-    const newPhoto = await getActivityPhotos(itinerary.destination, activity.activity, activity.location);
+    logger.info('🔄 Refreshing photo for activity:', { activity: activity.activity, location: activity.location });
+    
+    // Get multiple photos and pick a different one
+    const photos = await fetchPhotosForDestination(
+      `${activity.activity} ${itinerary.destination}`,
+      null,
+      5
+    );
+    
+    let newPhoto = null;
+    
+    if (photos.length > 0) {
+      // If activity already has a photo, try to get a different one
+      if (activity.photo && activity.photo.url) {
+        const currentPhotoUrl = activity.photo.url;
+        const differentPhotos = photos.filter(photo => photo.url !== currentPhotoUrl);
+        newPhoto = differentPhotos.length > 0 ? differentPhotos[0] : photos[0];
+      } else {
+        newPhoto = photos[0];
+      }
+    }
+    
+    // If no specific photo found, try destination photos
+    if (!newPhoto) {
+      const destinationPhotos = await fetchPhotosForDestination(itinerary.destination, null, 5);
+      if (destinationPhotos.length > 0) {
+        newPhoto = destinationPhotos[Math.floor(Math.random() * destinationPhotos.length)];
+      }
+    }
     
     // Update the specific activity
     itinerary.days[dayIdx].activities[actIdx].photo = newPhoto;
@@ -2743,7 +2880,13 @@ app.post('/api/itineraries/:id/days/:dayIndex/activities/:activityIndex/refresh-
     
     await itinerary.save();
     
-    logger.info('✅ Activity photo refreshed successfully', { userId, itineraryId: id, dayIdx, actIdx });
+    logger.info('✅ Activity photo refreshed successfully', { 
+      userId, 
+      itineraryId: id, 
+      dayIdx, 
+      actIdx,
+      newPhotoFound: !!newPhoto
+    });
     
     res.json({
       success: true,
