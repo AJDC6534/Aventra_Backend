@@ -295,98 +295,40 @@ async function fetchPhotosForDestination(destination, activityType = null, count
   
   logger.info('📸 Fetching photos for destination', { destination, activityType, count });
   
-  if (!destination || destination.trim().length === 0) {
-    logger.warn('⚠️ Empty destination provided for photo fetch');
-    return [];
-  }
-  
   // Try all services in parallel with different queries
   const searchQueries = [
     query,
     destination,
     `${destination} travel`,
-    `${destination} tourism`,
-    `${destination} city`,
-    `${destination} landscape`
+    `${destination} tourism`
   ];
   
   const photoPromises = [];
   
-  // Add Unsplash requests with multiple queries
+  // Add Unsplash requests
   if (process.env.UNSPLASH_ACCESS_KEY) {
-    logger.info('📸 Adding Unsplash requests');
-    for (let i = 0; i < Math.min(3, searchQueries.length); i++) {
-      photoPromises.push(
-        fetchUnsplashPhotos(searchQueries[i], Math.ceil(count / 3))
-          .catch(error => {
-            logger.error(`❌ Unsplash fetch failed for query "${searchQueries[i]}":`, error);
-            return [];
-          })
-      );
-    }
-  } else {
-    logger.warn('⚠️ Unsplash API key not configured');
+    photoPromises.push(fetchUnsplashPhotos(searchQueries[0], Math.ceil(count / 3)));
+    photoPromises.push(fetchUnsplashPhotos(searchQueries[1], Math.ceil(count / 3)));
   }
   
-  // Add Pexels requests with multiple queries
+  // Add Pexels requests
   if (process.env.PEXELS_API_KEY) {
-    logger.info('📸 Adding Pexels requests');
-    for (let i = 0; i < Math.min(2, searchQueries.length); i++) {
-      photoPromises.push(
-        fetchPexelsPhotos(searchQueries[i], Math.ceil(count / 3))
-          .catch(error => {
-            logger.error(`❌ Pexels fetch failed for query "${searchQueries[i]}":`, error);
-            return [];
-          })
-      );
-    }
-  } else {
-    logger.warn('⚠️ Pexels API key not configured');
+    photoPromises.push(fetchPexelsPhotos(searchQueries[0], Math.ceil(count / 3)));
   }
   
-  // Add Pixabay requests with multiple queries
+  // Add Pixabay requests
   if (process.env.PIXABAY_API_KEY) {
-    logger.info('📸 Adding Pixabay requests');
-    for (let i = 0; i < Math.min(2, searchQueries.length); i++) {
-      photoPromises.push(
-        fetchPixabayPhotos(searchQueries[i], Math.ceil(count / 3))
-          .catch(error => {
-            logger.error(`❌ Pixabay fetch failed for query "${searchQueries[i]}":`, error);
-            return [];
-          })
-      );
-    }
-  } else {
-    logger.warn('⚠️ Pixabay API key not configured');
-  }
-  
-  if (photoPromises.length === 0) {
-    logger.error('❌ No photo services configured! Please add API keys for Unsplash, Pexels, or Pixabay');
-    return [];
+    photoPromises.push(fetchPixabayPhotos(searchQueries[0], Math.ceil(count / 3)));
   }
   
   try {
-    logger.info(`📸 Executing ${photoPromises.length} photo requests`);
     const results = await Promise.allSettled(photoPromises);
     
     // Combine all successful results
     const allPhotos = results
       .filter(result => result.status === 'fulfilled')
       .flatMap(result => result.value)
-      .filter(photo => photo && photo.url && photo.url.trim().length > 0);
-    
-    logger.info('📸 Photo fetch results', { 
-      totalRequests: photoPromises.length,
-      totalPhotos: allPhotos.length
-    });
-    
-    if (allPhotos.length === 0) {
-      logger.error('❌ No photos found from any service!', { 
-        destination, 
-        searchQueries: searchQueries.slice(0, 3)
-      });
-      return [];
-    }
+      .filter(photo => photo && photo.url);
     
     // Remove duplicates based on URL
     const uniquePhotos = allPhotos.filter((photo, index, self) =>
@@ -407,7 +349,7 @@ async function fetchPhotosForDestination(destination, activityType = null, count
     return finalPhotos;
     
   } catch (error) {
-    logger.error('❌ Critical error fetching photos for destination:', error);
+    logger.error('❌ Error fetching photos for destination:', error);
     return [];
   }
 }
@@ -416,95 +358,47 @@ async function fetchPhotosForDestination(destination, activityType = null, count
 async function getActivityPhotos(destination, activity, location) {
   logger.info('📸 Getting activity-specific photos', { destination, activity, location });
   
-  if (!destination || !activity) {
-    logger.warn('⚠️ Missing destination or activity for photo fetch');
-    return null;
-  }
-  
   try {
-    // Create more specific search terms
+    // Extract activity type for better photo search
     const activityLower = activity.toLowerCase();
-    let searchTerms = [];
+    let activityType = '';
     
-    // Add location-based searches first (most specific)
-    if (location && location.trim()) {
-      searchTerms.push(location.trim());
-      searchTerms.push(`${location.trim()} ${destination}`);
-    }
-    
-    // Add activity-specific searches
-    if (activityLower.includes('cathedral') || activityLower.includes('church')) {
-      searchTerms.push(`${destination} cathedral`);
-      searchTerms.push(`${destination} church`);
-    } else if (activityLower.includes('museum')) {
-      searchTerms.push(`${destination} museum`);
-      searchTerms.push(`${activity} ${destination}`);
-    } else if (activityLower.includes('chocolate')) {
-      searchTerms.push(`${destination} chocolate museum`);
-      searchTerms.push(`chocolate museum`);
-    } else if (activityLower.includes('market')) {
-      searchTerms.push(`${destination} market`);
-      searchTerms.push(`${destination} shopping`);
-    } else if (activityLower.includes('restaurant') || activityLower.includes('lunch') || activityLower.includes('dinner')) {
-      searchTerms.push(`${destination} restaurant`);
-      searchTerms.push(`${destination} food`);
+    if (activityLower.includes('museum') || activityLower.includes('gallery')) {
+      activityType = 'museum';
+    } else if (activityLower.includes('temple') || activityLower.includes('shrine') || activityLower.includes('church')) {
+      activityType = 'temple';
+    } else if (activityLower.includes('market') || activityLower.includes('shopping')) {
+      activityType = 'market';
     } else if (activityLower.includes('park') || activityLower.includes('garden')) {
-      searchTerms.push(`${destination} park`);
-      searchTerms.push(`${destination} garden`);
-    } else if (activityLower.includes('tower') || activityLower.includes('viewpoint')) {
-      searchTerms.push(`${destination} tower`);
-      searchTerms.push(`${destination} view`);
-    } else {
-      // Generic searches
-      searchTerms.push(`${destination} ${activity}`);
-      searchTerms.push(`${destination} attraction`);
+      activityType = 'park';
+    } else if (activityLower.includes('restaurant') || activityLower.includes('food') || activityLower.includes('dining')) {
+      activityType = 'food';
+    } else if (activityLower.includes('beach')) {
+      activityType = 'beach';
+    } else if (activityLower.includes('mountain') || activityLower.includes('hiking')) {
+      activityType = 'mountain';
     }
     
-    // Add fallback searches
-    searchTerms.push(`${destination} tourism`);
-    searchTerms.push(`${destination} travel`);
-    searchTerms.push(destination);
+    // Try specific location first, then fall back to destination
+    const searchQueries = [
+      location,
+      `${destination} ${activityType}`,
+      `${destination} ${activity}`,
+      destination
+    ].filter(q => q && q.trim());
     
-    // Remove duplicates and empty strings
-    searchTerms = [...new Set(searchTerms.filter(term => term && term.trim().length > 0))];
-    
-    logger.info('📸 Trying search terms for activity', { 
-      activity, 
-      searchTerms: searchTerms.slice(0, 5),
-      totalTerms: searchTerms.length
-    });
-    
-    // Try each search term until we find photos
-    for (const searchTerm of searchTerms) {
-      try {
-        logger.debug(`📸 Trying search term: "${searchTerm}"`);
-        
-        const photos = await fetchPhotosForDestination(searchTerm, null, 1);
-        
-        if (photos && photos.length > 0 && photos[0].url) {
-          logger.info('✅ Activity photo found', { 
-            activity, 
-            searchTerm,
-            photoUrl: photos[0].url.substring(0, 50) + '...',
-            source: photos[0].source
-          });
-          return photos[0];
-        }
-      } catch (error) {
-        logger.error(`❌ Error fetching photo for search term "${searchTerm}":`, error);
-        continue;
+    for (const query of searchQueries) {
+      const photos = await fetchPhotosForDestination(query, null, 1);
+      if (photos.length > 0) {
+        logger.info('✅ Activity photo found', { activity, query, photoFound: true });
+        return photos[0];
       }
     }
     
-    logger.warn('⚠️ No activity photo found after trying all search terms', { 
-      activity, 
-      location,
-      searchTermsCount: searchTerms.length
-    });
+    logger.warn('⚠️ No activity photo found', { activity, location });
     return null;
-    
   } catch (error) {
-    logger.error('❌ Critical error getting activity photos:', error);
+    logger.error('❌ Error getting activity photos:', error);
     return null;
   }
 }
@@ -779,15 +673,8 @@ function generateIntelligentMockResponse(message, user, itinerary) {
 
 // AI Data Sanitization Functions
 function sanitizeTime(time) {
-  if (!time || typeof time !== 'string') {
-    return null;
-  }
-  
-  // Remove any extra text and clean up
-  const cleanTime = time.trim().replace(/[^\d:]/g, '');
-  
-  // Try to match HH:MM format
-  const timeMatch = cleanTime.match(/(\d{1,2}):(\d{2})/);
+  if (!time || typeof time !== 'string') return null;
+  const timeMatch = time.match(/(\d{1,2}):(\d{2})/);
   if (timeMatch) {
     const hours = parseInt(timeMatch[1]);
     const minutes = parseInt(timeMatch[2]);
@@ -795,164 +682,36 @@ function sanitizeTime(time) {
       return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
     }
   }
-  
-  // Try to match just hours
-  const hourMatch = cleanTime.match(/(\d{1,2})/);
-  if (hourMatch) {
-    const hours = parseInt(hourMatch[1]);
-    if (hours >= 0 && hours <= 23) {
-      return `${hours.toString().padStart(2, '0')}:00`;
-    }
-  }
-  
   return null;
 }
 
-function sanitizeString(str, maxLength = 200) {
-  if (!str || typeof str !== 'string') {
-    return null;
-  }
-  
-  return str.trim()
-    .replace(/\s+/g, ' ')  // Replace multiple spaces with single space
-    .substring(0, maxLength);
-}
-
-function sanitizeDuration(duration) {
-  if (!duration || typeof duration !== 'string') {
-    return '2 hours';
-  }
-  
-  const cleanDuration = duration.trim().toLowerCase();
-  
-  // If it already looks good, return it
-  if (cleanDuration.match(/^\d+\s*(hour|hr|minute|min|day)s?$/)) {
-    return duration.trim();
-  }
-  
-  // Try to extract numbers
-  const numberMatch = cleanDuration.match(/(\d+)/);
-  if (numberMatch) {
-    const number = parseInt(numberMatch[1]);
-    if (cleanDuration.includes('hour') || cleanDuration.includes('hr')) {
-      return `${number} hours`;
-    }
-    if (cleanDuration.includes('minute') || cleanDuration.includes('min')) {
-      return `${number} minutes`;
-    }
-    if (cleanDuration.includes('day')) {
-      return `${number} days`;
-    }
-  }
-  
-  // Default fallback
-  return '2 hours';
-}
-
-// Enhanced AI response cleaning and parsing
-function cleanAndParseAIResponse(aiResponse) {
-  logger.info('🧹 Cleaning AI response for JSON parsing');
-  
-  try {
-    // Remove any markdown formatting
-    let cleanResponse = aiResponse.trim();
-    cleanResponse = cleanResponse.replace(/```json\n?/g, '');
-    cleanResponse = cleanResponse.replace(/```\n?/g, '');
-    cleanResponse = cleanResponse.replace(/^```/g, '');
-    cleanResponse = cleanResponse.replace(/```$/g, '');
-    
-    // Find the JSON object
-    const jsonMatch = cleanResponse.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error('No JSON object found in response');
-    }
-    
-    let jsonStr = jsonMatch[0];
-    
-    // Fix common JSON issues
-    jsonStr = jsonStr
-      // Fix trailing commas
-      .replace(/,(\s*[}\]])/g, '$1')
-      // Fix unquoted keys
-      .replace(/(\w+):/g, '"$1":')
-      // Fix single quotes
-      .replace(/'/g, '"')
-      // Fix cost field issues - handle specific text values
-      .replace(/"cost":\s*"Free"/gi, '"cost": 0')
-      .replace(/"cost":\s*"free"/gi, '"cost": 0')
-      .replace(/"cost":\s*"No cost"/gi, '"cost": 0')
-      .replace(/"cost":\s*"Variable"/gi, '"cost": 25')
-      .replace(/"cost":\s*"Varies"/gi, '"cost": 30')
-      .replace(/"cost":\s*"Depends"/gi, '"cost": 20')
-      .replace(/"cost":\s*"Expensive"/gi, '"cost": 80')
-      .replace(/"cost":\s*"Cheap"/gi, '"cost": 10')
-      .replace(/"cost":\s*"Moderate"/gi, '"cost": 35')
-      // Fix any remaining quoted cost values
-      .replace(/"cost":\s*"[^"]*"/g, '"cost": 0')
-      // Fix any remaining non-numeric cost values
-      .replace(/"cost":\s*[^0-9,}\]\s]/g, '"cost": 0');
-    
-    logger.info('✅ AI response cleaned successfully');
-    return JSON.parse(jsonStr);
-    
-  } catch (error) {
-    logger.error('❌ Failed to clean and parse AI response:', error);
-    logger.error('❌ Raw response sample:', aiResponse.substring(0, 200));
-    throw new Error(`Failed to parse AI response: ${error.message}`);
-  }
+function sanitizeString(str) {
+  if (!str || typeof str !== 'string') return null;
+  return str.trim().substring(0, 200);
 }
 
 function sanitizeCost(cost, multiplier = 1) {
-  // Handle null/undefined
-  if (cost === null || cost === undefined) {
-    return Math.floor(Math.random() * 30 * multiplier) + 15;
-  }
-  
-  // If it's already a valid number
-  if (typeof cost === 'number' && !isNaN(cost)) {
+  if (typeof cost === 'number') {
     return Math.max(0, Math.round(cost * multiplier));
   }
   
-  // If it's a string, try to extract number or convert
   if (typeof cost === 'string') {
-    const lowerCost = cost.toLowerCase().trim();
+    const lowerCost = cost.toLowerCase();
     
-    // Handle free variations
-    if (lowerCost.includes('free') || lowerCost.includes('no cost') || lowerCost === '0' || lowerCost === '') {
+    if (lowerCost.includes('free') || lowerCost.includes('no cost') || lowerCost === '0') {
       return 0;
     }
     
-    // Handle common text patterns
-    if (lowerCost.includes('varies') || lowerCost.includes('variable') || lowerCost.includes('depends')) {
-      return Math.floor(Math.random() * 40 * multiplier) + 20;
+    const numberMatch = cost.match(/(\d+)/);
+    if (numberMatch) {
+      return Math.max(0, Math.round(parseInt(numberMatch[1]) * multiplier));
     }
     
-    if (lowerCost.includes('expensive') || lowerCost.includes('high')) {
-      return Math.floor(Math.random() * 50 * multiplier) + 80;
+    if (lowerCost.includes('variable') || lowerCost.includes('varies')) {
+      return Math.floor(Math.random() * 50 * multiplier) + 10;
     }
-    
-    if (lowerCost.includes('cheap') || lowerCost.includes('budget') || lowerCost.includes('low')) {
-      return Math.floor(Math.random() * 20 * multiplier) + 5;
-    }
-    
-    if (lowerCost.includes('moderate') || lowerCost.includes('medium')) {
-      return Math.floor(Math.random() * 30 * multiplier) + 25;
-    }
-    
-    // Try to extract numbers from the string
-    const numberMatches = cost.match(/\d+/g);
-    if (numberMatches && numberMatches.length > 0) {
-      const extractedNumber = parseInt(numberMatches[0]);
-      if (!isNaN(extractedNumber)) {
-        return Math.max(0, Math.round(extractedNumber * multiplier));
-      }
-    }
-    
-    // If we can't parse it, return a reasonable default
-    return Math.floor(Math.random() * 35 * multiplier) + 20;
   }
   
-  // Fallback for any other type
   return Math.floor(Math.random() * 30 * multiplier) + 15;
 }
 
@@ -1028,30 +787,16 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
     
     if (aiDay.activities && Array.isArray(aiDay.activities)) {
       aiDay.activities.forEach((activity, index) => {
-        try {
-          const sanitizedActivity = {
-            time: sanitizeTime(activity.time) || `${Math.max(8, 9 + index * 2)}:00`,
-            activity: sanitizeString(activity.activity) || getDefaultActivity(interests, index),
-            location: sanitizeString(activity.location) || `${destination} - City Center`,
-            duration: sanitizeDuration(activity.duration),
-            cost: sanitizeCost(activity.cost, budgetMultiplier),
-            notes: sanitizeString(activity.notes) || 'Enjoy this activity!'
-          };
-          
-          sanitizedActivities.push(sanitizedActivity);
-        } catch (activityError) {
-          logger.error(`❌ Error sanitizing activity ${index}:`, activityError);
-          
-          // Add a fallback activity
-          sanitizedActivities.push({
-            time: `${Math.max(8, 9 + index * 2)}:00`,
-            activity: getDefaultActivity(interests, index),
-            location: `${destination} - Popular Area`,
-            duration: '2 hours',
-            cost: sanitizeCost(null, budgetMultiplier),
-            notes: 'Explore and enjoy!'
-          });
-        }
+        const sanitizedActivity = {
+          time: sanitizeTime(activity.time) || `${9 + index * 2}:00`,
+          activity: sanitizeString(activity.activity) || 'Explore local area',
+          location: sanitizeString(activity.location) || `${destination} - City Center`,
+          duration: sanitizeString(activity.duration) || '2 hours',
+          cost: sanitizeCost(activity.cost, budgetMultiplier),
+          notes: sanitizeString(activity.notes) || 'Enjoy this activity!'
+        };
+        
+        sanitizedActivities.push(sanitizedActivity);
       });
     }
     
@@ -1060,11 +805,11 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
     while (sanitizedActivities.length < minActivities) {
       const activityIndex = sanitizedActivities.length;
       sanitizedActivities.push({
-        time: `${Math.max(8, 9 + activityIndex * 2)}:00`,
+        time: `${9 + activityIndex * 2}:00`,
         activity: getDefaultActivity(interests, activityIndex),
         location: `${destination} - Popular Area`,
         duration: '2 hours',
-        cost: sanitizeCost(null, budgetMultiplier),
+        cost: Math.floor(Math.random() * 30 * budgetMultiplier) + 10,
         notes: 'Explore and enjoy!'
       });
     }
@@ -1077,13 +822,11 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   
   logger.info('✅ AI itinerary sanitization complete', { 
     destination, 
-    daysGenerated: sanitizedDays.length,
-    totalActivities: sanitizedDays.reduce((sum, day) => sum + day.activities.length, 0)
+    daysGenerated: sanitizedDays.length 
   });
   
   return { days: sanitizedDays };
 }
-
 
 // Enhanced sanitization function that includes photos
 async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr) {
@@ -1097,82 +840,28 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
     return null;
   }
   
-  logger.info('📸 Starting photo generation process');
-  
-  // Get destination photos with retry logic
-  let destinationPhotos = [];
-  let photoAttempts = 0;
-  const maxPhotoAttempts = 3;
-  
-  while (destinationPhotos.length === 0 && photoAttempts < maxPhotoAttempts) {
-    photoAttempts++;
-    logger.info(`📸 Attempt ${photoAttempts} to fetch destination photos`);
-    
-    try {
-      destinationPhotos = await fetchPhotosForDestination(destination, null, 5);
-      if (destinationPhotos.length > 0) {
-        logger.info('✅ Destination photos fetched successfully', { count: destinationPhotos.length });
-        break;
-      }
-    } catch (error) {
-      logger.error(`❌ Photo fetch attempt ${photoAttempts} failed:`, error);
-    }
-    
-    // Wait before retry
-    if (photoAttempts < maxPhotoAttempts) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-  }
-  
-  if (destinationPhotos.length === 0) {
-    logger.error('❌ Failed to fetch any destination photos after all attempts');
-    
-    // Create fallback photos
-    destinationPhotos = [{
-      id: 'fallback-1',
-      url: 'https://via.placeholder.com/800x600/4A90E2/FFFFFF?text=' + encodeURIComponent(destination),
-      thumb: 'https://via.placeholder.com/400x300/4A90E2/FFFFFF?text=' + encodeURIComponent(destination),
-      description: `${destination} - Travel destination`,
-      photographer: 'Placeholder',
-      source: 'fallback'
-    }];
-  }
+  // Get destination photos
+  const destinationPhotos = await fetchPhotosForDestination(destination, null, 5);
   
   // Add photos to each day and activity
   const enhancedDays = await Promise.all(
     basicItinerary.days.map(async (day, dayIndex) => {
-      logger.info(`📸 Processing day ${dayIndex + 1}/${basicItinerary.days.length}`);
+      logger.debug(`📸 Adding photos to day ${dayIndex + 1}`);
       
       // Add photos to each activity
       const enhancedActivities = await Promise.all(
         day.activities.map(async (activity, activityIndex) => {
-          logger.info(`📸 Processing activity ${activityIndex + 1}/${day.activities.length}: ${activity.activity}`);
-          
           try {
             // Get activity-specific photo
             const activityPhoto = await getActivityPhotos(destination, activity.activity, activity.location);
             
-            const enhancedActivity = {
+            return {
               ...activity,
               photo: activityPhoto,
               fallbackPhoto: activityPhoto ? null : destinationPhotos[activityIndex % destinationPhotos.length] || null
             };
-            
-            if (activityPhoto) {
-              logger.info('✅ Activity photo added', { 
-                activity: activity.activity, 
-                photoSource: activityPhoto.source 
-              });
-            } else {
-              logger.warn('⚠️ No activity photo found, using fallback', { 
-                activity: activity.activity 
-              });
-            }
-            
-            return enhancedActivity;
-            
           } catch (error) {
-            logger.error(`❌ Error processing activity ${activityIndex}:`, error);
+            logger.error(`❌ Error adding photo to activity ${activityIndex}:`, error);
             return {
               ...activity,
               photo: null,
@@ -1190,24 +879,18 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
     })
   );
   
-  const finalResult = {
+  logger.info('✅ AI itinerary with photos sanitization complete', { 
+    destination, 
+    daysGenerated: enhancedDays.length,
+    destinationPhotos: destinationPhotos.length
+  });
+  
+  return {
     ...basicItinerary,
     days: enhancedDays,
     destinationPhotos: destinationPhotos.slice(0, 3),
     photosEnabled: true
   };
-  
-  logger.info('✅ AI itinerary with photos sanitization complete', { 
-    destination, 
-    daysGenerated: enhancedDays.length,
-    destinationPhotos: destinationPhotos.length,
-    totalActivities: enhancedDays.reduce((sum, day) => sum + day.activities.length, 0),
-    activitiesWithPhotos: enhancedDays.reduce((sum, day) => 
-      sum + day.activities.filter(act => act.photo && act.photo.url).length, 0
-    )
-  });
-  
-  return finalResult;
 }
 
 function generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr) {
@@ -2416,76 +2099,43 @@ app.get('/api/itineraries/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// ===== ROBUST ITINERARY UPDATE ROUTE =====
 app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.userId;
     const updates = { ...req.body, updatedAt: Date.now() };
     
-    logger.info('✏️ Updating itinerary', { 
-      itineraryId: id, 
-      userId, 
-      hasDestination: !!updates.destination,
-      hasStartDate: !!updates.startDate,
-      hasEndDate: !!updates.endDate
-    });
+    logger.info('✏️ Updating itinerary', { itineraryId: id, userId });
     
-    // Validate itinerary ID
-    if (!id || id.length !== 24) {
-      logger.warn('⚠️ Invalid itinerary ID format', { itineraryId: id });
-      return res.status(400).json({ message: 'Invalid itinerary ID format' });
-    }
-    
-    // Find existing itinerary
-    const existingItinerary = await Itinerary.findOne({ _id: id, userId }).catch(err => {
-      logger.error('❌ Database error finding itinerary:', err);
-      return null;
-    });
+    const existingItinerary = await Itinerary.findOne({ _id: id, userId });
     
     if (!existingItinerary) {
       logger.warn('⚠️ Itinerary not found for update', { itineraryId: id, userId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
-    logger.info('📋 Found existing itinerary', { 
-      title: existingItinerary.title,
-      destination: existingItinerary.destination,
-      photosEnabled: existingItinerary.photosEnabled
-    });
-    
     // Check if destination has changed
     const destinationChanged = existingItinerary.destination !== updates.destination;
     
     // Update title if destination changed
     if (destinationChanged) {
-      logger.info('🏙️ Destination changed, updating title', { 
+      logger.info('🏙️ Destination changed, updating title and photos', { 
         oldDestination: existingItinerary.destination,
         newDestination: updates.destination 
       });
       
+      // Update title to reflect new destination
       const aiGenerated = existingItinerary.aiGenerated;
       updates.title = `${aiGenerated ? 'AI-Generated' : 'Custom'} Trip to ${updates.destination}`;
     }
     
     // Check if dates have changed
-    let datesChanged = false;
-    let oldStartDate = null;
-    let newStartDate = null;
-    let oldEndDate = null;
-    let newEndDate = null;
+    const oldStartDate = new Date(existingItinerary.startDate).toISOString().split('T')[0];
+    const newStartDate = new Date(updates.startDate).toISOString().split('T')[0];
+    const oldEndDate = new Date(existingItinerary.endDate).toISOString().split('T')[0];
+    const newEndDate = new Date(updates.endDate).toISOString().split('T')[0];
     
-    try {
-      oldStartDate = new Date(existingItinerary.startDate).toISOString().split('T')[0];
-      newStartDate = new Date(updates.startDate).toISOString().split('T')[0];
-      oldEndDate = new Date(existingItinerary.endDate).toISOString().split('T')[0];
-      newEndDate = new Date(updates.endDate).toISOString().split('T')[0];
-      
-      datesChanged = oldStartDate !== newStartDate || oldEndDate !== newEndDate;
-    } catch (dateError) {
-      logger.error('❌ Error parsing dates:', dateError);
-      datesChanged = false;
-    }
+    const datesChanged = oldStartDate !== newStartDate || oldEndDate !== newEndDate;
     
     if (datesChanged) {
       logger.info('📅 Dates changed, updating day structure', { 
@@ -2495,133 +2145,81 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
         newEndDate 
       });
       
-      try {
-        // Calculate new duration
-        const newDuration = Math.ceil((new Date(newEndDate) - new Date(newStartDate)) / (1000 * 60 * 60 * 24)) + 1;
-        const oldDuration = existingItinerary.days ? existingItinerary.days.length : 0;
+      // Calculate new duration
+      const newDuration = Math.ceil((new Date(newEndDate) - new Date(newStartDate)) / (1000 * 60 * 60 * 24)) + 1;
+      const oldDuration = existingItinerary.days ? existingItinerary.days.length : 0;
+      
+      // Update the days array to match new dates
+      const updatedDays = [];
+      const startDate = new Date(newStartDate + 'T00:00:00');
+      
+      for (let i = 0; i < newDuration; i++) {
+        const currentDate = new Date(startDate);
+        currentDate.setDate(startDate.getDate() + i);
+        const dateStr = currentDate.toISOString().split('T')[0];
         
-        logger.info('📊 Duration calculation', { oldDuration, newDuration });
-        
-        // Update the days array to match new dates
-        const updatedDays = [];
-        const startDate = new Date(newStartDate + 'T00:00:00');
-        
-        for (let i = 0; i < newDuration; i++) {
-          const currentDate = new Date(startDate);
-          currentDate.setDate(startDate.getDate() + i);
-          const dateStr = currentDate.toISOString().split('T')[0];
-          
-          // Try to preserve activities from corresponding old day
-          let dayActivities = [];
-          let dayPhoto = null;
-          
-          if (i < oldDuration && existingItinerary.days[i]) {
-            dayActivities = existingItinerary.days[i].activities || [];
-            dayPhoto = existingItinerary.days[i].dayPhoto || null;
-          }
-          
-          updatedDays.push({
-            date: dateStr,
-            activities: dayActivities,
-            dayPhoto: dayPhoto
-          });
+        // Try to preserve activities from corresponding old day
+        let dayActivities = [];
+        let dayPhoto = null;
+        if (i < oldDuration && existingItinerary.days[i] && existingItinerary.days[i].activities) {
+          dayActivities = existingItinerary.days[i].activities;
+          dayPhoto = existingItinerary.days[i].dayPhoto || null;
         }
         
-        updates.days = updatedDays;
-        logger.info('✅ Days array updated successfully', { daysCount: updatedDays.length });
-        
-      } catch (daysError) {
-        logger.error('❌ Error updating days array:', daysError);
-        // Continue without updating days if there's an error
+        updatedDays.push({
+          date: dateStr,
+          activities: dayActivities,
+          dayPhoto: dayPhoto
+        });
       }
+      
+      updates.days = updatedDays;
     }
     
     // Handle destination change - regenerate photos if photos are enabled
     if (destinationChanged && existingItinerary.photosEnabled) {
-      logger.info('📸 Starting photo regeneration for new destination', { 
+      logger.info('📸 Regenerating photos for new destination', { 
         oldDestination: existingItinerary.destination,
         newDestination: updates.destination 
       });
       
       try {
-        // Check if photo services are available
-        const photoServicesAvailable = !!(
-          process.env.UNSPLASH_ACCESS_KEY || 
-          process.env.PEXELS_API_KEY || 
-          process.env.PIXABAY_API_KEY
-        );
+        // Get new destination photos
+        const newDestinationPhotos = await fetchPhotosForDestination(updates.destination, null, 5);
         
-        if (!photoServicesAvailable) {
-          logger.warn('⚠️ No photo services available, skipping photo regeneration');
-        } else {
-          // Get new destination photos with timeout
-          const photoPromise = fetchPhotosForDestination(updates.destination, null, 5);
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Photo fetch timeout')), 15000)
-          );
-          
-          const newDestinationPhotos = await Promise.race([photoPromise, timeoutPromise])
-            .catch(photoError => {
-              logger.error('❌ Photo fetch failed:', photoError);
-              return []; // Return empty array on error
-            });
-          
-          if (newDestinationPhotos.length > 0) {
-            logger.info('✅ New destination photos fetched', { count: newDestinationPhotos.length });
-            
-            // Update destination photos
-            updates.destinationPhotos = newDestinationPhotos.slice(0, 3);
-            
-            // Update day and activity photos
-            const currentDays = updates.days || existingItinerary.days || [];
-            
-            const enhancedDays = await Promise.all(
-              currentDays.map(async (day, dayIndex) => {
-                const enhancedActivities = await Promise.all(
-                  (day.activities || []).map(async (activity, activityIndex) => {
-                    try {
-                      // Get new activity-specific photo for the new destination
-                      const photoPromise = getActivityPhotos(updates.destination, activity.activity, activity.location);
-                      const timeoutPromise = new Promise((_, reject) => 
-                        setTimeout(() => reject(new Error('Activity photo timeout')), 5000)
-                      );
-                      
-                      const newActivityPhoto = await Promise.race([photoPromise, timeoutPromise])
-                        .catch(() => null); // Return null on error
-                      
-                      return {
-                        ...activity,
-                        photo: newActivityPhoto,
-                        fallbackPhoto: newActivityPhoto ? null : newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
-                      };
-                    } catch (activityPhotoError) {
-                      logger.error(`❌ Error updating activity photo ${activityIndex}:`, activityPhotoError);
-                      return {
-                        ...activity,
-                        photo: null,
-                        fallbackPhoto: newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
-                      };
-                    }
-                  })
-                );
+        // Update destination photos
+        updates.destinationPhotos = newDestinationPhotos.slice(0, 3);
+        
+        // Update day and activity photos
+        const enhancedDays = await Promise.all(
+          (updates.days || existingItinerary.days).map(async (day, dayIndex) => {
+            const enhancedActivities = await Promise.all(
+              day.activities.map(async (activity, activityIndex) => {
+                // Get new activity-specific photo for the new destination
+                const newActivityPhoto = await getActivityPhotos(updates.destination, activity.activity, activity.location);
                 
                 return {
-                  ...day,
-                  activities: enhancedActivities,
-                  dayPhoto: newDestinationPhotos[dayIndex % newDestinationPhotos.length] || null
+                  ...activity,
+                  photo: newActivityPhoto,
+                  fallbackPhoto: newActivityPhoto ? null : newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
                 };
               })
             );
             
-            updates.days = enhancedDays;
-            logger.info('✅ Photos regenerated successfully', { 
-              newDestination: updates.destination,
-              photoCount: newDestinationPhotos.length 
-            });
-          } else {
-            logger.warn('⚠️ No photos found for new destination, keeping existing structure');
-          }
-        }
+            return {
+              ...day,
+              activities: enhancedActivities,
+              dayPhoto: newDestinationPhotos[dayIndex % newDestinationPhotos.length] || null
+            };
+          })
+        );
+        
+        updates.days = enhancedDays;
+        
+        logger.info('✅ Photos regenerated successfully for new destination', { 
+          newDestination: updates.destination,
+          photoCount: newDestinationPhotos.length 
+        });
         
       } catch (photoError) {
         logger.error('❌ Error regenerating photos for new destination:', photoError);
@@ -2629,56 +2227,43 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
       }
     }
     
-    // Update the itinerary in database
-    logger.info('💾 Updating itinerary in database');
-    
     const itinerary = await Itinerary.findOneAndUpdate(
       { _id: id, userId },
       updates,
       { new: true, runValidators: true }
-    ).catch(updateError => {
-      logger.error('❌ Database update error:', updateError);
-      throw new Error(`Database update failed: ${updateError.message}`);
-    });
+    );
     
     if (!itinerary) {
-      logger.warn('⚠️ Itinerary update failed - not found after update', { itineraryId: id, userId });
+      logger.warn('⚠️ Itinerary update failed', { itineraryId: id, userId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
     // Log activity with more details
-    try {
-      const activityDescription = [];
-      if (destinationChanged) {
-        activityDescription.push(`destination changed to ${updates.destination}`);
-      }
-      if (datesChanged) {
-        activityDescription.push('dates updated');
-      }
-      if (destinationChanged && existingItinerary.photosEnabled) {
-        activityDescription.push('photos regenerated');
-      }
-      
-      await new UserActivity({
-        userId,
-        type: 'itinerary_updated',
-        title: 'Itinerary updated',
-        description: `Updated "${itinerary.title}" - ${activityDescription.join(', ')}`,
-        icon: '✏️',
-        metadata: { 
-          itineraryId: itinerary._id,
-          destination: itinerary.destination,
-          destinationChanged,
-          datesChanged,
-          photosRegenerated: destinationChanged && existingItinerary.photosEnabled
-        }
-      }).save().catch(activityError => {
-        logger.error('❌ Error saving user activity:', activityError);
-        // Don't fail the request if activity logging fails
-      });
-    } catch (activityError) {
-      logger.error('❌ Error creating user activity:', activityError);
+    const activityDescription = [];
+    if (destinationChanged) {
+      activityDescription.push(`destination changed to ${updates.destination}`);
     }
+    if (datesChanged) {
+      activityDescription.push('dates updated');
+    }
+    if (destinationChanged && existingItinerary.photosEnabled) {
+      activityDescription.push('photos regenerated');
+    }
+    
+    await new UserActivity({
+      userId,
+      type: 'itinerary_updated',
+      title: 'Itinerary updated',
+      description: `Updated "${itinerary.title}" - ${activityDescription.join(', ')}`,
+      icon: '✏️',
+      metadata: { 
+        itineraryId: itinerary._id,
+        destination: itinerary.destination,
+        destinationChanged,
+        datesChanged,
+        photosRegenerated: destinationChanged && existingItinerary.photosEnabled
+      }
+    }).save();
     
     logger.info('✅ Itinerary updated successfully', { 
       itineraryId: id, 
@@ -2689,165 +2274,9 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
     });
     
     res.json(itinerary);
-    
   } catch (error) {
     logger.error('❌ Itinerary update error:', error);
-    
-    // Return appropriate error response
-    if (error.name === 'ValidationError') {
-      return res.status(400).json({ 
-        message: 'Validation error',
-        error: error.message 
-      });
-    }
-    
-    if (error.name === 'CastError') {
-      return res.status(400).json({ 
-        message: 'Invalid data format',
-        error: 'Invalid itinerary ID or data format' 
-      });
-    }
-    
-    res.status(500).json({ 
-      message: 'Server error', 
-      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
-    });
-  }
-});
-
-// ===== ALTERNATIVE REGENERATE PHOTOS ROUTE =====
-app.post('/api/itineraries/:id/regenerate-photos', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const userId = req.user.userId;
-    
-    logger.info('🔄 Photo regeneration request', { itineraryId: id, userId });
-    
-    // Validate itinerary ID
-    if (!id || id.length !== 24) {
-      logger.warn('⚠️ Invalid itinerary ID format', { itineraryId: id });
-      return res.status(400).json({ message: 'Invalid itinerary ID format' });
-    }
-    
-    const itinerary = await Itinerary.findOne({ _id: id, userId });
-    
-    if (!itinerary) {
-      logger.warn('⚠️ Itinerary not found for photo regeneration', { itineraryId: id, userId });
-      return res.status(404).json({ message: 'Itinerary not found' });
-    }
-    
-    // Check if photo services are available
-    const photoServicesAvailable = !!(
-      process.env.UNSPLASH_ACCESS_KEY || 
-      process.env.PEXELS_API_KEY || 
-      process.env.PIXABAY_API_KEY
-    );
-    
-    if (!photoServicesAvailable) {
-      logger.warn('⚠️ No photo services configured');
-      return res.status(400).json({ 
-        message: 'Photo services not configured. Please contact administrator.' 
-      });
-    }
-    
-    logger.info('📸 Starting photo regeneration process');
-    
-    // Get new destination photos
-    const newDestinationPhotos = await fetchPhotosForDestination(itinerary.destination, null, 5)
-      .catch(error => {
-        logger.error('❌ Error fetching destination photos:', error);
-        return [];
-      });
-    
-    if (newDestinationPhotos.length === 0) {
-      logger.warn('⚠️ No photos found for destination');
-      return res.status(404).json({ 
-        message: 'No photos found for this destination' 
-      });
-    }
-    
-    // Update day and activity photos
-    const enhancedDays = await Promise.all(
-      itinerary.days.map(async (day, dayIndex) => {
-        const enhancedActivities = await Promise.all(
-          day.activities.map(async (activity, activityIndex) => {
-            try {
-              const newActivityPhoto = await getActivityPhotos(
-                itinerary.destination, 
-                activity.activity, 
-                activity.location
-              ).catch(() => null);
-              
-              return {
-                ...activity,
-                photo: newActivityPhoto,
-                fallbackPhoto: newActivityPhoto ? null : newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
-              };
-            } catch (error) {
-              logger.error(`❌ Error updating activity photo ${activityIndex}:`, error);
-              return {
-                ...activity,
-                photo: null,
-                fallbackPhoto: newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
-              };
-            }
-          })
-        );
-        
-        return {
-          ...day,
-          activities: enhancedActivities,
-          dayPhoto: newDestinationPhotos[dayIndex % newDestinationPhotos.length] || null
-        };
-      })
-    );
-    
-    // Update the itinerary
-    const updatedItinerary = await Itinerary.findByIdAndUpdate(
-      id,
-      {
-        days: enhancedDays,
-        destinationPhotos: newDestinationPhotos.slice(0, 3),
-        photosEnabled: true,
-        updatedAt: Date.now()
-      },
-      { new: true }
-    );
-    
-    // Log activity
-    await new UserActivity({
-      userId,
-      type: 'photos_regenerated',
-      title: 'Photos regenerated',
-      description: `Regenerated photos for "${itinerary.title}"`,
-      icon: '🔄',
-      metadata: { 
-        itineraryId: itinerary._id,
-        photoCount: newDestinationPhotos.length
-      }
-    }).save().catch(err => {
-      logger.error('❌ Error saving user activity:', err);
-    });
-    
-    logger.info('✅ Photos regenerated successfully', { 
-      itineraryId: id, 
-      userId, 
-      photoCount: newDestinationPhotos.length 
-    });
-    
-    res.json({
-      success: true,
-      message: 'Photos regenerated successfully',
-      photoCount: newDestinationPhotos.length,
-      itinerary: updatedItinerary
-    });
-    
-  } catch (error) {
-    logger.error('❌ Photo regeneration error:', error);
-    res.status(500).json({ 
-      message: 'Failed to regenerate photos',
-      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
-    });
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
@@ -2890,22 +2319,7 @@ app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
       includePhotos 
     });
     
-    // Validate required fields
-    if (!destination || !startDate || !endDate) {
-      logger.warn('⚠️ Missing required fields for itinerary generation');
-      return res.status(400).json({ 
-        message: 'Destination, start date, and end date are required' 
-      });
-    }
-    
     const days = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
-    
-    if (days < 1 || days > 30) {
-      logger.warn('⚠️ Invalid trip duration', { days });
-      return res.status(400).json({ 
-        message: 'Trip duration must be between 1 and 30 days' 
-      });
-    }
     
     let generatedItinerary;
     let useAI = false;
@@ -2919,8 +2333,6 @@ app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
       try {
         logger.info('🤖 Attempting Gemini AI generation');
         
-        const activitiesPerDay = pace === 'relaxed' ? '2-3' : pace === 'active' ? '4-5' : '3-4';
-        
         const prompt = `You are a travel expert. Create a ${days}-day itinerary for ${destination}.
 
 User preferences:
@@ -2929,15 +2341,17 @@ User preferences:
 - Travel pace: ${pace}
 - Dates: ${startDate} to ${endDate}
 
-CRITICAL RULES FOR JSON RESPONSE:
-1. Cost MUST be a NUMBER (integer), never text like "varies" or "depends"
-2. Use 0 for free activities
-3. Use actual dollar amounts like 25, 50, 100 for paid activities
-4. Times must be in HH:MM format (like "09:00", "14:30")
-5. Make location names specific for better photo matching
-6. Generate exactly ${days} days with ${activitiesPerDay} activities each
+IMPORTANT: Generate activities for each day but DO NOT worry about specific dates in your response. 
+Focus on creating great activities. The dates will be handled separately.
 
-Create a JSON response with this EXACT structure:
+Create a JSON response with this EXACT structure. Follow these rules strictly:
+1. Cost must be a NUMBER (integer), never text
+2. Use 0 for free activities
+3. Times must be in HH:MM format
+4. All fields are required
+5. Generate exactly ${days} days worth of activities
+6. Make location names specific and detailed for better photo matching
+
 {
   "days": [
     {
@@ -2945,50 +2359,37 @@ Create a JSON response with this EXACT structure:
         {
           "time": "09:00",
           "activity": "Visit Senso-ji Temple",
-          "location": "4-2-1 Asakusa, Taito City, Tokyo",
+          "location": "Asakusa, Tokyo",
           "duration": "2 hours",
           "cost": 0,
           "notes": "Free admission, arrive early to avoid crowds"
-        },
-        {
-          "time": "11:30",
-          "activity": "Tokyo National Museum",
-          "location": "13-9 Uenokoen, Taito City, Tokyo",
-          "duration": "3 hours",
-          "cost": 1000,
-          "notes": "General admission, world-class artifacts"
         }
       ]
     }
   ]
 }
 
-Remember: 
-- Cost must be INTEGER numbers only (0, 15, 25, 50, etc.)
-- NO text in cost field ("varies", "depends", "free" should be 0)
-- Generate exactly ${days} days
-- Each day should have ${activitiesPerDay} activities
-- Only return the JSON, no other text`;
+Generate exactly ${days} days of activities. Make costs realistic integers in USD. Make location names specific for photo search. No explanatory text, just the JSON.`;
 
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const geminiResponse = response.text();
         
-        logger.info('✅ Gemini AI responded successfully', { 
-          responseLength: geminiResponse.length 
-        });
+        logger.info('✅ Gemini AI responded successfully');
         
-        // Clean and parse the AI response
-        let aiItinerary;
-        try {
-          aiItinerary = cleanAndParseAIResponse(geminiResponse);
-        } catch (parseError) {
-          logger.error('❌ Failed to parse AI response, falling back to mock:', parseError);
-          throw new Error('Invalid AI response format');
+        // Extract and clean JSON
+        let jsonStr = geminiResponse.trim();
+        jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+        
+        const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          jsonStr = jsonMatch[0];
         }
         
-        // Validate and sanitize the data
+        let aiItinerary = JSON.parse(jsonStr);
+        
+        // Validate and sanitize the data with photos
         if (includePhotos) {
           logger.info('📸 Adding photos to AI-generated itinerary');
           generatedItinerary = await sanitizeAIItineraryWithPhotos(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
