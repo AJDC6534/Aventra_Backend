@@ -2863,6 +2863,289 @@ app.post('/api/itineraries/:id/regenerate-photos', authenticateToken, async (req
   }
 });
 
+app.get('/api/debug/activity-photos', authenticateToken, async (req, res) => {
+  try {
+    const { destination, activity, location } = req.query;
+    
+    if (!destination || !activity) {
+      return res.status(400).json({ 
+        message: 'destination and activity parameters are required' 
+      });
+    }
+    
+    logger.info('🔍 Debug: Testing activity photo fetch', { destination, activity, location });
+    
+    const result = {
+      destination,
+      activity,
+      location,
+      timestamp: new Date().toISOString(),
+      photos: [],
+      searchTerms: [],
+      errors: []
+    };
+    
+    // Test the activity photo function
+    try {
+      const photo = await getActivityPhotos(destination, activity, location);
+      
+      if (photo) {
+        result.photos.push(photo);
+        result.success = true;
+        result.message = 'Activity photo found successfully';
+      } else {
+        result.success = false;
+        result.message = 'No activity photo found';
+      }
+    } catch (error) {
+      result.success = false;
+      result.error = error.message;
+    }
+    
+    // Also test basic destination search
+    try {
+      const destinationPhotos = await fetchPhotosForDestination(destination, null, 2);
+      result.destinationPhotos = destinationPhotos;
+    } catch (error) {
+      result.destinationError = error.message;
+    }
+    
+    res.json(result);
+    
+  } catch (error) {
+    logger.error('❌ Activity photo debug error:', error);
+    res.status(500).json({ 
+      message: 'Debug failed',
+      error: error.message
+    });
+  }
+});
+
+// Enhanced prompt for better AI responses
+const createEnhancedPrompt = (destination, days, interests, budget, pace, startDate, endDate) => {
+  const activitiesPerDay = pace === 'relaxed' ? '2-3' : pace === 'active' ? '4-5' : '3-4';
+  
+  return `You are a travel expert. Create a ${days}-day itinerary for ${destination}.
+
+User preferences:
+- Interests: ${interests.join(', ')}
+- Budget: ${budget}
+- Travel pace: ${pace}
+- Dates: ${startDate} to ${endDate}
+
+CRITICAL REQUIREMENTS:
+1. Cost field must ALWAYS be a number (integer), never text
+2. Use 0 for free activities
+3. Use realistic dollar amounts: 10, 25, 50, 100 for paid activities
+4. Times must be "HH:MM" format (09:00, 14:30)
+5. Make location names specific and detailed
+6. Include popular attractions and landmarks
+7. Generate exactly ${days} days with ${activitiesPerDay} activities each
+
+COST EXAMPLES:
+- Free attractions: "cost": 0
+- Museums: "cost": 15
+- Restaurants: "cost": 30
+- Tours: "cost": 50
+- Shows: "cost": 80
+
+JSON FORMAT (EXACT):
+{
+  "days": [
+    {
+      "activities": [
+        {
+          "time": "09:00",
+          "activity": "Visit Cologne Cathedral",
+          "location": "Cologne Cathedral, Domkloster 4, 50667 Köln, Germany",
+          "duration": "2 hours",
+          "cost": 0,
+          "notes": "Free entrance, climb tower for panoramic views (extra fee)"
+        },
+        {
+          "time": "11:30",
+          "activity": "Cologne Chocolate Museum",
+          "location": "Chocolate Museum, Am Schokoladenmuseum 1A, 50678 Köln, Germany",
+          "duration": "1.5 hours",
+          "cost": 15,
+          "notes": "Learn about chocolate history and enjoy samples"
+        }
+      ]
+    }
+  ]
+}
+
+REMEMBER:
+- Cost must be INTEGER numbers only (0, 10, 25, 50, etc.)
+- NO text in cost field like "Free", "Varies", "Depends"
+- Use specific landmark names and addresses when possible
+- Generate exactly ${days} days
+- Only return valid JSON, no other text`;
+};
+
+// Update the itinerary generation route to use the enhanced prompt
+app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
+  try {
+    const { destination, startDate, endDate, interests, budget, pace, includePhotos = true } = req.body;
+    const userId = req.user.userId;
+    
+    logger.info('🎯 Itinerary generation request', { 
+      userId, 
+      destination, 
+      startDate, 
+      endDate, 
+      interests, 
+      budget, 
+      pace, 
+      includePhotos 
+    });
+    
+    // Validate required fields
+    if (!destination || !startDate || !endDate) {
+      return res.status(400).json({ 
+        message: 'Destination, start date, and end date are required' 
+      });
+    }
+    
+    const days = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
+    
+    if (days < 1 || days > 30) {
+      return res.status(400).json({ 
+        message: 'Trip duration must be between 1 and 30 days' 
+      });
+    }
+    
+    let generatedItinerary;
+    let useAI = false;
+    let provider = 'mock';
+    
+    // Check if we can use Gemini
+    const hasValidKey = process.env.GEMINI_API_KEY && genAI;
+    const withinRateLimit = rateLimiter.isAllowed(userId);
+    
+    if (hasValidKey && withinRateLimit) {
+      try {
+        logger.info('🤖 Attempting Gemini AI generation');
+        
+        // Use the enhanced prompt
+        const prompt = createEnhancedPrompt(destination, days, interests, budget, pace, startDate, endDate);
+        
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const geminiResponse = response.text();
+        
+        logger.info('✅ Gemini AI responded successfully', { 
+          responseLength: geminiResponse.length,
+          preview: geminiResponse.substring(0, 100) + '...'
+        });
+        
+        // Clean and parse the AI response
+        let aiItinerary;
+        try {
+          aiItinerary = cleanAndParseAIResponse(geminiResponse);
+          logger.info('✅ AI response parsed successfully');
+        } catch (parseError) {
+          logger.error('❌ Failed to parse AI response:', parseError);
+          throw new Error('Invalid AI response format');
+        }
+        
+        // Validate and sanitize the data
+        if (includePhotos) {
+          logger.info('📸 Adding photos to AI-generated itinerary');
+          generatedItinerary = await sanitizeAIItineraryWithPhotos(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
+        } else {
+          generatedItinerary = sanitizeAIItinerary(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
+        }
+        
+        if (generatedItinerary && generatedItinerary.days && generatedItinerary.days.length > 0) {
+          useAI = true;
+          provider = 'gemini';
+          logger.info('✅ AI itinerary generated successfully');
+        } else {
+          throw new Error('Invalid itinerary structure from AI');
+        }
+        
+      } catch (aiError) {
+        logger.error('❌ AI generation failed, falling back to mock:', aiError);
+        
+        if (includePhotos) {
+          generatedItinerary = await generateHighQualityMockItineraryWithPhotos(destination, days, interests, budget, pace, startDate);
+        } else {
+          generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDate);
+        }
+        provider = 'mock';
+      }
+    } else {
+      logger.warn('⚠️ Using mock generation', { hasValidKey, withinRateLimit });
+      
+      if (includePhotos) {
+        generatedItinerary = await generateHighQualityMockItineraryWithPhotos(destination, days, interests, budget, pace, startDate);
+      } else {
+        generatedItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDate);
+      }
+      provider = 'mock';
+    }
+    
+    // Final validation
+    if (!generatedItinerary || !generatedItinerary.days || generatedItinerary.days.length === 0) {
+      throw new Error('Failed to generate valid itinerary');
+    }
+    
+    // Create and save the itinerary
+    const itinerary = new Itinerary({
+      userId,
+      title: `${useAI ? 'AI-Generated' : 'Custom'} Trip to ${destination}`,
+      destination,
+      startDate,
+      endDate,
+      budget: budget === 'budget' ? 500 : budget === 'mid-range' ? 1500 : 3000,
+      preferences: { interests, pace },
+      days: generatedItinerary.days,
+      aiGenerated: useAI,
+      photosEnabled: includePhotos,
+      destinationPhotos: generatedItinerary.destinationPhotos || [],
+    });
+    
+    const savedItinerary = await itinerary.save();
+    
+    // Log activity
+    await new UserActivity({
+      userId,
+      type: 'itinerary_generated',
+      title: `${useAI ? 'AI-Generated' : 'Custom'} itinerary created`,
+      description: `Generated ${days}-day itinerary for ${destination}${includePhotos ? ' with photos' : ''}`,
+      icon: '🗺️',
+      metadata: { 
+        destination, 
+        days, 
+        provider,
+        photosEnabled: includePhotos
+      }
+    }).save();
+    
+    logger.info('✅ Itinerary generation completed successfully', { 
+      itineraryId: savedItinerary._id,
+      provider,
+      photosEnabled: includePhotos
+    });
+    
+    res.json({
+      ...savedItinerary.toObject(),
+      provider,
+      photosEnabled: includePhotos,
+      message: useAI ? 'AI-generated itinerary created!' : 'Custom itinerary created!'
+    });
+    
+  } catch (error) {
+    logger.error('❌ Itinerary generation error:', error);
+    res.status(500).json({ 
+      message: 'Failed to generate itinerary',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+});
+
 app.delete('/api/itineraries/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
