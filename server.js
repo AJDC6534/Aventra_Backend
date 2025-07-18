@@ -2099,7 +2099,7 @@ app.get('/api/itineraries/:id', authenticateToken, async (req, res) => {
   }
 });
 
-app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
+app.put('/api/generate-itineraries/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.userId;
