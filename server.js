@@ -2389,43 +2389,76 @@ app.get('/api/itineraries/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// ===== ROBUST ITINERARY UPDATE ROUTE =====
 app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.userId;
     const updates = { ...req.body, updatedAt: Date.now() };
     
-    logger.info('✏️ Updating itinerary', { itineraryId: id, userId });
+    logger.info('✏️ Updating itinerary', { 
+      itineraryId: id, 
+      userId, 
+      hasDestination: !!updates.destination,
+      hasStartDate: !!updates.startDate,
+      hasEndDate: !!updates.endDate
+    });
     
-    const existingItinerary = await Itinerary.findOne({ _id: id, userId });
+    // Validate itinerary ID
+    if (!id || id.length !== 24) {
+      logger.warn('⚠️ Invalid itinerary ID format', { itineraryId: id });
+      return res.status(400).json({ message: 'Invalid itinerary ID format' });
+    }
+    
+    // Find existing itinerary
+    const existingItinerary = await Itinerary.findOne({ _id: id, userId }).catch(err => {
+      logger.error('❌ Database error finding itinerary:', err);
+      return null;
+    });
     
     if (!existingItinerary) {
       logger.warn('⚠️ Itinerary not found for update', { itineraryId: id, userId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
+    logger.info('📋 Found existing itinerary', { 
+      title: existingItinerary.title,
+      destination: existingItinerary.destination,
+      photosEnabled: existingItinerary.photosEnabled
+    });
+    
     // Check if destination has changed
     const destinationChanged = existingItinerary.destination !== updates.destination;
     
     // Update title if destination changed
     if (destinationChanged) {
-      logger.info('🏙️ Destination changed, updating title and photos', { 
+      logger.info('🏙️ Destination changed, updating title', { 
         oldDestination: existingItinerary.destination,
         newDestination: updates.destination 
       });
       
-      // Update title to reflect new destination
       const aiGenerated = existingItinerary.aiGenerated;
       updates.title = `${aiGenerated ? 'AI-Generated' : 'Custom'} Trip to ${updates.destination}`;
     }
     
     // Check if dates have changed
-    const oldStartDate = new Date(existingItinerary.startDate).toISOString().split('T')[0];
-    const newStartDate = new Date(updates.startDate).toISOString().split('T')[0];
-    const oldEndDate = new Date(existingItinerary.endDate).toISOString().split('T')[0];
-    const newEndDate = new Date(updates.endDate).toISOString().split('T')[0];
+    let datesChanged = false;
+    let oldStartDate = null;
+    let newStartDate = null;
+    let oldEndDate = null;
+    let newEndDate = null;
     
-    const datesChanged = oldStartDate !== newStartDate || oldEndDate !== newEndDate;
+    try {
+      oldStartDate = new Date(existingItinerary.startDate).toISOString().split('T')[0];
+      newStartDate = new Date(updates.startDate).toISOString().split('T')[0];
+      oldEndDate = new Date(existingItinerary.endDate).toISOString().split('T')[0];
+      newEndDate = new Date(updates.endDate).toISOString().split('T')[0];
+      
+      datesChanged = oldStartDate !== newStartDate || oldEndDate !== newEndDate;
+    } catch (dateError) {
+      logger.error('❌ Error parsing dates:', dateError);
+      datesChanged = false;
+    }
     
     if (datesChanged) {
       logger.info('📅 Dates changed, updating day structure', { 
@@ -2435,81 +2468,133 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
         newEndDate 
       });
       
-      // Calculate new duration
-      const newDuration = Math.ceil((new Date(newEndDate) - new Date(newStartDate)) / (1000 * 60 * 60 * 24)) + 1;
-      const oldDuration = existingItinerary.days ? existingItinerary.days.length : 0;
-      
-      // Update the days array to match new dates
-      const updatedDays = [];
-      const startDate = new Date(newStartDate + 'T00:00:00');
-      
-      for (let i = 0; i < newDuration; i++) {
-        const currentDate = new Date(startDate);
-        currentDate.setDate(startDate.getDate() + i);
-        const dateStr = currentDate.toISOString().split('T')[0];
+      try {
+        // Calculate new duration
+        const newDuration = Math.ceil((new Date(newEndDate) - new Date(newStartDate)) / (1000 * 60 * 60 * 24)) + 1;
+        const oldDuration = existingItinerary.days ? existingItinerary.days.length : 0;
         
-        // Try to preserve activities from corresponding old day
-        let dayActivities = [];
-        let dayPhoto = null;
-        if (i < oldDuration && existingItinerary.days[i] && existingItinerary.days[i].activities) {
-          dayActivities = existingItinerary.days[i].activities;
-          dayPhoto = existingItinerary.days[i].dayPhoto || null;
+        logger.info('📊 Duration calculation', { oldDuration, newDuration });
+        
+        // Update the days array to match new dates
+        const updatedDays = [];
+        const startDate = new Date(newStartDate + 'T00:00:00');
+        
+        for (let i = 0; i < newDuration; i++) {
+          const currentDate = new Date(startDate);
+          currentDate.setDate(startDate.getDate() + i);
+          const dateStr = currentDate.toISOString().split('T')[0];
+          
+          // Try to preserve activities from corresponding old day
+          let dayActivities = [];
+          let dayPhoto = null;
+          
+          if (i < oldDuration && existingItinerary.days[i]) {
+            dayActivities = existingItinerary.days[i].activities || [];
+            dayPhoto = existingItinerary.days[i].dayPhoto || null;
+          }
+          
+          updatedDays.push({
+            date: dateStr,
+            activities: dayActivities,
+            dayPhoto: dayPhoto
+          });
         }
         
-        updatedDays.push({
-          date: dateStr,
-          activities: dayActivities,
-          dayPhoto: dayPhoto
-        });
+        updates.days = updatedDays;
+        logger.info('✅ Days array updated successfully', { daysCount: updatedDays.length });
+        
+      } catch (daysError) {
+        logger.error('❌ Error updating days array:', daysError);
+        // Continue without updating days if there's an error
       }
-      
-      updates.days = updatedDays;
     }
     
     // Handle destination change - regenerate photos if photos are enabled
     if (destinationChanged && existingItinerary.photosEnabled) {
-      logger.info('📸 Regenerating photos for new destination', { 
+      logger.info('📸 Starting photo regeneration for new destination', { 
         oldDestination: existingItinerary.destination,
         newDestination: updates.destination 
       });
       
       try {
-        // Get new destination photos
-        const newDestinationPhotos = await fetchPhotosForDestination(updates.destination, null, 5);
+        // Check if photo services are available
+        const photoServicesAvailable = !!(
+          process.env.UNSPLASH_ACCESS_KEY || 
+          process.env.PEXELS_API_KEY || 
+          process.env.PIXABAY_API_KEY
+        );
         
-        // Update destination photos
-        updates.destinationPhotos = newDestinationPhotos.slice(0, 3);
-        
-        // Update day and activity photos
-        const enhancedDays = await Promise.all(
-          (updates.days || existingItinerary.days).map(async (day, dayIndex) => {
-            const enhancedActivities = await Promise.all(
-              day.activities.map(async (activity, activityIndex) => {
-                // Get new activity-specific photo for the new destination
-                const newActivityPhoto = await getActivityPhotos(updates.destination, activity.activity, activity.location);
+        if (!photoServicesAvailable) {
+          logger.warn('⚠️ No photo services available, skipping photo regeneration');
+        } else {
+          // Get new destination photos with timeout
+          const photoPromise = fetchPhotosForDestination(updates.destination, null, 5);
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Photo fetch timeout')), 15000)
+          );
+          
+          const newDestinationPhotos = await Promise.race([photoPromise, timeoutPromise])
+            .catch(photoError => {
+              logger.error('❌ Photo fetch failed:', photoError);
+              return []; // Return empty array on error
+            });
+          
+          if (newDestinationPhotos.length > 0) {
+            logger.info('✅ New destination photos fetched', { count: newDestinationPhotos.length });
+            
+            // Update destination photos
+            updates.destinationPhotos = newDestinationPhotos.slice(0, 3);
+            
+            // Update day and activity photos
+            const currentDays = updates.days || existingItinerary.days || [];
+            
+            const enhancedDays = await Promise.all(
+              currentDays.map(async (day, dayIndex) => {
+                const enhancedActivities = await Promise.all(
+                  (day.activities || []).map(async (activity, activityIndex) => {
+                    try {
+                      // Get new activity-specific photo for the new destination
+                      const photoPromise = getActivityPhotos(updates.destination, activity.activity, activity.location);
+                      const timeoutPromise = new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Activity photo timeout')), 5000)
+                      );
+                      
+                      const newActivityPhoto = await Promise.race([photoPromise, timeoutPromise])
+                        .catch(() => null); // Return null on error
+                      
+                      return {
+                        ...activity,
+                        photo: newActivityPhoto,
+                        fallbackPhoto: newActivityPhoto ? null : newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
+                      };
+                    } catch (activityPhotoError) {
+                      logger.error(`❌ Error updating activity photo ${activityIndex}:`, activityPhotoError);
+                      return {
+                        ...activity,
+                        photo: null,
+                        fallbackPhoto: newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
+                      };
+                    }
+                  })
+                );
                 
                 return {
-                  ...activity,
-                  photo: newActivityPhoto,
-                  fallbackPhoto: newActivityPhoto ? null : newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
+                  ...day,
+                  activities: enhancedActivities,
+                  dayPhoto: newDestinationPhotos[dayIndex % newDestinationPhotos.length] || null
                 };
               })
             );
             
-            return {
-              ...day,
-              activities: enhancedActivities,
-              dayPhoto: newDestinationPhotos[dayIndex % newDestinationPhotos.length] || null
-            };
-          })
-        );
-        
-        updates.days = enhancedDays;
-        
-        logger.info('✅ Photos regenerated successfully for new destination', { 
-          newDestination: updates.destination,
-          photoCount: newDestinationPhotos.length 
-        });
+            updates.days = enhancedDays;
+            logger.info('✅ Photos regenerated successfully', { 
+              newDestination: updates.destination,
+              photoCount: newDestinationPhotos.length 
+            });
+          } else {
+            logger.warn('⚠️ No photos found for new destination, keeping existing structure');
+          }
+        }
         
       } catch (photoError) {
         logger.error('❌ Error regenerating photos for new destination:', photoError);
@@ -2517,43 +2602,56 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
       }
     }
     
+    // Update the itinerary in database
+    logger.info('💾 Updating itinerary in database');
+    
     const itinerary = await Itinerary.findOneAndUpdate(
       { _id: id, userId },
       updates,
       { new: true, runValidators: true }
-    );
+    ).catch(updateError => {
+      logger.error('❌ Database update error:', updateError);
+      throw new Error(`Database update failed: ${updateError.message}`);
+    });
     
     if (!itinerary) {
-      logger.warn('⚠️ Itinerary update failed', { itineraryId: id, userId });
+      logger.warn('⚠️ Itinerary update failed - not found after update', { itineraryId: id, userId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
     // Log activity with more details
-    const activityDescription = [];
-    if (destinationChanged) {
-      activityDescription.push(`destination changed to ${updates.destination}`);
-    }
-    if (datesChanged) {
-      activityDescription.push('dates updated');
-    }
-    if (destinationChanged && existingItinerary.photosEnabled) {
-      activityDescription.push('photos regenerated');
-    }
-    
-    await new UserActivity({
-      userId,
-      type: 'itinerary_updated',
-      title: 'Itinerary updated',
-      description: `Updated "${itinerary.title}" - ${activityDescription.join(', ')}`,
-      icon: '✏️',
-      metadata: { 
-        itineraryId: itinerary._id,
-        destination: itinerary.destination,
-        destinationChanged,
-        datesChanged,
-        photosRegenerated: destinationChanged && existingItinerary.photosEnabled
+    try {
+      const activityDescription = [];
+      if (destinationChanged) {
+        activityDescription.push(`destination changed to ${updates.destination}`);
       }
-    }).save();
+      if (datesChanged) {
+        activityDescription.push('dates updated');
+      }
+      if (destinationChanged && existingItinerary.photosEnabled) {
+        activityDescription.push('photos regenerated');
+      }
+      
+      await new UserActivity({
+        userId,
+        type: 'itinerary_updated',
+        title: 'Itinerary updated',
+        description: `Updated "${itinerary.title}" - ${activityDescription.join(', ')}`,
+        icon: '✏️',
+        metadata: { 
+          itineraryId: itinerary._id,
+          destination: itinerary.destination,
+          destinationChanged,
+          datesChanged,
+          photosRegenerated: destinationChanged && existingItinerary.photosEnabled
+        }
+      }).save().catch(activityError => {
+        logger.error('❌ Error saving user activity:', activityError);
+        // Don't fail the request if activity logging fails
+      });
+    } catch (activityError) {
+      logger.error('❌ Error creating user activity:', activityError);
+    }
     
     logger.info('✅ Itinerary updated successfully', { 
       itineraryId: id, 
@@ -2564,9 +2662,165 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
     });
     
     res.json(itinerary);
+    
   } catch (error) {
     logger.error('❌ Itinerary update error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    
+    // Return appropriate error response
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ 
+        message: 'Validation error',
+        error: error.message 
+      });
+    }
+    
+    if (error.name === 'CastError') {
+      return res.status(400).json({ 
+        message: 'Invalid data format',
+        error: 'Invalid itinerary ID or data format' 
+      });
+    }
+    
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+});
+
+// ===== ALTERNATIVE REGENERATE PHOTOS ROUTE =====
+app.post('/api/itineraries/:id/regenerate-photos', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.userId;
+    
+    logger.info('🔄 Photo regeneration request', { itineraryId: id, userId });
+    
+    // Validate itinerary ID
+    if (!id || id.length !== 24) {
+      logger.warn('⚠️ Invalid itinerary ID format', { itineraryId: id });
+      return res.status(400).json({ message: 'Invalid itinerary ID format' });
+    }
+    
+    const itinerary = await Itinerary.findOne({ _id: id, userId });
+    
+    if (!itinerary) {
+      logger.warn('⚠️ Itinerary not found for photo regeneration', { itineraryId: id, userId });
+      return res.status(404).json({ message: 'Itinerary not found' });
+    }
+    
+    // Check if photo services are available
+    const photoServicesAvailable = !!(
+      process.env.UNSPLASH_ACCESS_KEY || 
+      process.env.PEXELS_API_KEY || 
+      process.env.PIXABAY_API_KEY
+    );
+    
+    if (!photoServicesAvailable) {
+      logger.warn('⚠️ No photo services configured');
+      return res.status(400).json({ 
+        message: 'Photo services not configured. Please contact administrator.' 
+      });
+    }
+    
+    logger.info('📸 Starting photo regeneration process');
+    
+    // Get new destination photos
+    const newDestinationPhotos = await fetchPhotosForDestination(itinerary.destination, null, 5)
+      .catch(error => {
+        logger.error('❌ Error fetching destination photos:', error);
+        return [];
+      });
+    
+    if (newDestinationPhotos.length === 0) {
+      logger.warn('⚠️ No photos found for destination');
+      return res.status(404).json({ 
+        message: 'No photos found for this destination' 
+      });
+    }
+    
+    // Update day and activity photos
+    const enhancedDays = await Promise.all(
+      itinerary.days.map(async (day, dayIndex) => {
+        const enhancedActivities = await Promise.all(
+          day.activities.map(async (activity, activityIndex) => {
+            try {
+              const newActivityPhoto = await getActivityPhotos(
+                itinerary.destination, 
+                activity.activity, 
+                activity.location
+              ).catch(() => null);
+              
+              return {
+                ...activity,
+                photo: newActivityPhoto,
+                fallbackPhoto: newActivityPhoto ? null : newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
+              };
+            } catch (error) {
+              logger.error(`❌ Error updating activity photo ${activityIndex}:`, error);
+              return {
+                ...activity,
+                photo: null,
+                fallbackPhoto: newDestinationPhotos[activityIndex % newDestinationPhotos.length] || null
+              };
+            }
+          })
+        );
+        
+        return {
+          ...day,
+          activities: enhancedActivities,
+          dayPhoto: newDestinationPhotos[dayIndex % newDestinationPhotos.length] || null
+        };
+      })
+    );
+    
+    // Update the itinerary
+    const updatedItinerary = await Itinerary.findByIdAndUpdate(
+      id,
+      {
+        days: enhancedDays,
+        destinationPhotos: newDestinationPhotos.slice(0, 3),
+        photosEnabled: true,
+        updatedAt: Date.now()
+      },
+      { new: true }
+    );
+    
+    // Log activity
+    await new UserActivity({
+      userId,
+      type: 'photos_regenerated',
+      title: 'Photos regenerated',
+      description: `Regenerated photos for "${itinerary.title}"`,
+      icon: '🔄',
+      metadata: { 
+        itineraryId: itinerary._id,
+        photoCount: newDestinationPhotos.length
+      }
+    }).save().catch(err => {
+      logger.error('❌ Error saving user activity:', err);
+    });
+    
+    logger.info('✅ Photos regenerated successfully', { 
+      itineraryId: id, 
+      userId, 
+      photoCount: newDestinationPhotos.length 
+    });
+    
+    res.json({
+      success: true,
+      message: 'Photos regenerated successfully',
+      photoCount: newDestinationPhotos.length,
+      itinerary: updatedItinerary
+    });
+    
+  } catch (error) {
+    logger.error('❌ Photo regeneration error:', error);
+    res.status(500).json({ 
+      message: 'Failed to regenerate photos',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 });
 
