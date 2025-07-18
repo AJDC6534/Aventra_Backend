@@ -763,8 +763,15 @@ function generateIntelligentMockResponse(message, user, itinerary) {
 
 // AI Data Sanitization Functions
 function sanitizeTime(time) {
-  if (!time || typeof time !== 'string') return null;
-  const timeMatch = time.match(/(\d{1,2}):(\d{2})/);
+  if (!time || typeof time !== 'string') {
+    return null;
+  }
+  
+  // Remove any extra text and clean up
+  const cleanTime = time.trim().replace(/[^\d:]/g, '');
+  
+  // Try to match HH:MM format
+  const timeMatch = cleanTime.match(/(\d{1,2}):(\d{2})/);
   if (timeMatch) {
     const hours = parseInt(timeMatch[1]);
     const minutes = parseInt(timeMatch[2]);
@@ -772,36 +779,153 @@ function sanitizeTime(time) {
       return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
     }
   }
+  
+  // Try to match just hours
+  const hourMatch = cleanTime.match(/(\d{1,2})/);
+  if (hourMatch) {
+    const hours = parseInt(hourMatch[1]);
+    if (hours >= 0 && hours <= 23) {
+      return `${hours.toString().padStart(2, '0')}:00`;
+    }
+  }
+  
   return null;
 }
 
-function sanitizeString(str) {
-  if (!str || typeof str !== 'string') return null;
-  return str.trim().substring(0, 200);
+function sanitizeString(str, maxLength = 200) {
+  if (!str || typeof str !== 'string') {
+    return null;
+  }
+  
+  return str.trim()
+    .replace(/\s+/g, ' ')  // Replace multiple spaces with single space
+    .substring(0, maxLength);
+}
+
+function sanitizeDuration(duration) {
+  if (!duration || typeof duration !== 'string') {
+    return '2 hours';
+  }
+  
+  const cleanDuration = duration.trim().toLowerCase();
+  
+  // If it already looks good, return it
+  if (cleanDuration.match(/^\d+\s*(hour|hr|minute|min|day)s?$/)) {
+    return duration.trim();
+  }
+  
+  // Try to extract numbers
+  const numberMatch = cleanDuration.match(/(\d+)/);
+  if (numberMatch) {
+    const number = parseInt(numberMatch[1]);
+    if (cleanDuration.includes('hour') || cleanDuration.includes('hr')) {
+      return `${number} hours`;
+    }
+    if (cleanDuration.includes('minute') || cleanDuration.includes('min')) {
+      return `${number} minutes`;
+    }
+    if (cleanDuration.includes('day')) {
+      return `${number} days`;
+    }
+  }
+  
+  // Default fallback
+  return '2 hours';
+}
+
+// Enhanced AI response cleaning and parsing
+function cleanAndParseAIResponse(aiResponse) {
+  logger.info('🧹 Cleaning AI response for JSON parsing');
+  
+  try {
+    // Remove any markdown formatting
+    let cleanResponse = aiResponse.trim();
+    cleanResponse = cleanResponse.replace(/```json\n?/g, '');
+    cleanResponse = cleanResponse.replace(/```\n?/g, '');
+    cleanResponse = cleanResponse.replace(/^```/g, '');
+    cleanResponse = cleanResponse.replace(/```$/g, '');
+    
+    // Find the JSON object
+    const jsonMatch = cleanResponse.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('No JSON object found in response');
+    }
+    
+    let jsonStr = jsonMatch[0];
+    
+    // Fix common JSON issues
+    jsonStr = jsonStr
+      // Fix trailing commas
+      .replace(/,(\s*[}\]])/g, '$1')
+      // Fix unquoted keys
+      .replace(/(\w+):/g, '"$1":')
+      // Fix single quotes
+      .replace(/'/g, '"')
+      // Fix cost field issues - replace text values with 0
+      .replace(/"cost":\s*"[^"]*"/g, '"cost": 0')
+      // Fix any remaining non-numeric cost values
+      .replace(/"cost":\s*[^0-9,}\]]/g, '"cost": 0');
+    
+    logger.info('✅ AI response cleaned successfully');
+    return JSON.parse(jsonStr);
+    
+  } catch (error) {
+    logger.error('❌ Failed to clean and parse AI response:', error);
+    throw new Error(`Failed to parse AI response: ${error.message}`);
+  }
 }
 
 function sanitizeCost(cost, multiplier = 1) {
-  if (typeof cost === 'number') {
+  // Handle null/undefined
+  if (cost === null || cost === undefined) {
+    return Math.floor(Math.random() * 30 * multiplier) + 15;
+  }
+  
+  // If it's already a valid number
+  if (typeof cost === 'number' && !isNaN(cost)) {
     return Math.max(0, Math.round(cost * multiplier));
   }
   
+  // If it's a string, try to extract number or convert
   if (typeof cost === 'string') {
-    const lowerCost = cost.toLowerCase();
+    const lowerCost = cost.toLowerCase().trim();
     
-    if (lowerCost.includes('free') || lowerCost.includes('no cost') || lowerCost === '0') {
+    // Handle free variations
+    if (lowerCost.includes('free') || lowerCost.includes('no cost') || lowerCost === '0' || lowerCost === '') {
       return 0;
     }
     
-    const numberMatch = cost.match(/(\d+)/);
-    if (numberMatch) {
-      return Math.max(0, Math.round(parseInt(numberMatch[1]) * multiplier));
+    // Handle common text patterns
+    if (lowerCost.includes('varies') || lowerCost.includes('variable') || lowerCost.includes('depends')) {
+      return Math.floor(Math.random() * 40 * multiplier) + 20;
     }
     
-    if (lowerCost.includes('variable') || lowerCost.includes('varies')) {
-      return Math.floor(Math.random() * 50 * multiplier) + 10;
+    if (lowerCost.includes('expensive') || lowerCost.includes('high')) {
+      return Math.floor(Math.random() * 50 * multiplier) + 80;
     }
+    
+    if (lowerCost.includes('cheap') || lowerCost.includes('budget') || lowerCost.includes('low')) {
+      return Math.floor(Math.random() * 20 * multiplier) + 5;
+    }
+    
+    if (lowerCost.includes('moderate') || lowerCost.includes('medium')) {
+      return Math.floor(Math.random() * 30 * multiplier) + 25;
+    }
+    
+    // Try to extract numbers from the string
+    const numberMatches = cost.match(/\d+/g);
+    if (numberMatches && numberMatches.length > 0) {
+      const extractedNumber = parseInt(numberMatches[0]);
+      if (!isNaN(extractedNumber)) {
+        return Math.max(0, Math.round(extractedNumber * multiplier));
+      }
+    }
+    
+    // If we can't parse it, return a reasonable default
+    return Math.floor(Math.random() * 35 * multiplier) + 20;
   }
   
+  // Fallback for any other type
   return Math.floor(Math.random() * 30 * multiplier) + 15;
 }
 
@@ -877,16 +1001,30 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
     
     if (aiDay.activities && Array.isArray(aiDay.activities)) {
       aiDay.activities.forEach((activity, index) => {
-        const sanitizedActivity = {
-          time: sanitizeTime(activity.time) || `${9 + index * 2}:00`,
-          activity: sanitizeString(activity.activity) || 'Explore local area',
-          location: sanitizeString(activity.location) || `${destination} - City Center`,
-          duration: sanitizeString(activity.duration) || '2 hours',
-          cost: sanitizeCost(activity.cost, budgetMultiplier),
-          notes: sanitizeString(activity.notes) || 'Enjoy this activity!'
-        };
-        
-        sanitizedActivities.push(sanitizedActivity);
+        try {
+          const sanitizedActivity = {
+            time: sanitizeTime(activity.time) || `${Math.max(8, 9 + index * 2)}:00`,
+            activity: sanitizeString(activity.activity) || getDefaultActivity(interests, index),
+            location: sanitizeString(activity.location) || `${destination} - City Center`,
+            duration: sanitizeDuration(activity.duration),
+            cost: sanitizeCost(activity.cost, budgetMultiplier),
+            notes: sanitizeString(activity.notes) || 'Enjoy this activity!'
+          };
+          
+          sanitizedActivities.push(sanitizedActivity);
+        } catch (activityError) {
+          logger.error(`❌ Error sanitizing activity ${index}:`, activityError);
+          
+          // Add a fallback activity
+          sanitizedActivities.push({
+            time: `${Math.max(8, 9 + index * 2)}:00`,
+            activity: getDefaultActivity(interests, index),
+            location: `${destination} - Popular Area`,
+            duration: '2 hours',
+            cost: sanitizeCost(null, budgetMultiplier),
+            notes: 'Explore and enjoy!'
+          });
+        }
       });
     }
     
@@ -895,11 +1033,11 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
     while (sanitizedActivities.length < minActivities) {
       const activityIndex = sanitizedActivities.length;
       sanitizedActivities.push({
-        time: `${9 + activityIndex * 2}:00`,
+        time: `${Math.max(8, 9 + activityIndex * 2)}:00`,
         activity: getDefaultActivity(interests, activityIndex),
         location: `${destination} - Popular Area`,
         duration: '2 hours',
-        cost: Math.floor(Math.random() * 30 * budgetMultiplier) + 10,
+        cost: sanitizeCost(null, budgetMultiplier),
         notes: 'Explore and enjoy!'
       });
     }
@@ -912,11 +1050,13 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   
   logger.info('✅ AI itinerary sanitization complete', { 
     destination, 
-    daysGenerated: sanitizedDays.length 
+    daysGenerated: sanitizedDays.length,
+    totalActivities: sanitizedDays.reduce((sum, day) => sum + day.activities.length, 0)
   });
   
   return { days: sanitizedDays };
 }
+
 
 // Enhanced sanitization function that includes photos
 async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr) {
@@ -2486,22 +2626,6 @@ app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
       });
     }
     
-    // Check photo service availability if photos are requested
-    if (includePhotos) {
-      const photoServicesAvailable = !!(
-        process.env.UNSPLASH_ACCESS_KEY || 
-        process.env.PEXELS_API_KEY || 
-        process.env.PIXABAY_API_KEY
-      );
-      
-      if (!photoServicesAvailable) {
-        logger.warn('⚠️ Photos requested but no photo services configured');
-        return res.status(400).json({ 
-          message: 'Photos requested but no photo services are configured. Please contact administrator.' 
-        });
-      }
-    }
-    
     let generatedItinerary;
     let useAI = false;
     let provider = 'mock';
@@ -2514,6 +2638,8 @@ app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
       try {
         logger.info('🤖 Attempting Gemini AI generation');
         
+        const activitiesPerDay = pace === 'relaxed' ? '2-3' : pace === 'active' ? '4-5' : '3-4';
+        
         const prompt = `You are a travel expert. Create a ${days}-day itinerary for ${destination}.
 
 User preferences:
@@ -2522,8 +2648,13 @@ User preferences:
 - Travel pace: ${pace}
 - Dates: ${startDate} to ${endDate}
 
-IMPORTANT: Generate activities for each day but DO NOT worry about specific dates in your response. 
-Focus on creating great activities with detailed location names for photo matching.
+CRITICAL RULES FOR JSON RESPONSE:
+1. Cost MUST be a NUMBER (integer), never text like "varies" or "depends"
+2. Use 0 for free activities
+3. Use actual dollar amounts like 25, 50, 100 for paid activities
+4. Times must be in HH:MM format (like "09:00", "14:30")
+5. Make location names specific for better photo matching
+6. Generate exactly ${days} days with ${activitiesPerDay} activities each
 
 Create a JSON response with this EXACT structure:
 {
@@ -2537,41 +2668,46 @@ Create a JSON response with this EXACT structure:
           "duration": "2 hours",
           "cost": 0,
           "notes": "Free admission, arrive early to avoid crowds"
+        },
+        {
+          "time": "11:30",
+          "activity": "Tokyo National Museum",
+          "location": "13-9 Uenokoen, Taito City, Tokyo",
+          "duration": "3 hours",
+          "cost": 1000,
+          "notes": "General admission, world-class artifacts"
         }
       ]
     }
   ]
 }
 
-Rules:
-1. Cost must be a NUMBER (integer), never text
-2. Use 0 for free activities
-3. Times must be in HH:MM format
-4. Make location names specific and detailed
-5. Generate exactly ${days} days
-6. Include ${pace === 'relaxed' ? '2-3' : pace === 'active' ? '4-5' : '3-4'} activities per day
-
-Generate exactly ${days} days of activities. Make costs realistic integers in USD. No explanatory text, just JSON.`;
+Remember: 
+- Cost must be INTEGER numbers only (0, 15, 25, 50, etc.)
+- NO text in cost field ("varies", "depends", "free" should be 0)
+- Generate exactly ${days} days
+- Each day should have ${activitiesPerDay} activities
+- Only return the JSON, no other text`;
 
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const geminiResponse = response.text();
         
-        logger.info('✅ Gemini AI responded successfully');
+        logger.info('✅ Gemini AI responded successfully', { 
+          responseLength: geminiResponse.length 
+        });
         
-        // Extract and clean JSON
-        let jsonStr = geminiResponse.trim();
-        jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-        
-        const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          jsonStr = jsonMatch[0];
+        // Clean and parse the AI response
+        let aiItinerary;
+        try {
+          aiItinerary = cleanAndParseAIResponse(geminiResponse);
+        } catch (parseError) {
+          logger.error('❌ Failed to parse AI response, falling back to mock:', parseError);
+          throw new Error('Invalid AI response format');
         }
         
-        let aiItinerary = JSON.parse(jsonStr);
-        
-        // Validate and sanitize the data with photos
+        // Validate and sanitize the data
         if (includePhotos) {
           logger.info('📸 Adding photos to AI-generated itinerary');
           generatedItinerary = await sanitizeAIItineraryWithPhotos(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
@@ -2657,12 +2793,7 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       userId,
       destination,
       provider,
-      photosEnabled: includePhotos,
-      photoStats: includePhotos ? {
-        destinationPhotos: generatedItinerary.destinationPhotos?.length || 0,
-        activitiesWithPhotos: generatedItinerary.days?.reduce((sum, day) => 
-          sum + day.activities.filter(act => act.photo && act.photo.url).length, 0) || 0
-      } : null
+      photosEnabled: includePhotos
     });
     
     res.json({
@@ -2674,12 +2805,6 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
         pexels: !!process.env.PEXELS_API_KEY,
         pixabay: !!process.env.PIXABAY_API_KEY
       },
-      photoStats: includePhotos ? {
-        destinationPhotos: generatedItinerary.destinationPhotos?.length || 0,
-        activitiesWithPhotos: generatedItinerary.days?.reduce((sum, day) => 
-          sum + day.activities.filter(act => act.photo && act.photo.url).length, 0) || 0,
-        totalActivities: generatedItinerary.days?.reduce((sum, day) => sum + day.activities.length, 0) || 0
-      } : null,
       message: useAI ? 
         `AI-generated itinerary created${includePhotos ? ' with photos' : ''}!` : 
         `Custom itinerary created${includePhotos ? ' with photos' : ''}!`
