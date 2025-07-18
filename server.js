@@ -2102,12 +2102,13 @@ app.get('/api/itineraries/:id', authenticateToken, async (req, res) => {
 app.put('/api/generate-itineraries/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { forceRefreshPhotos } = req.query; // New: Allow manual photo refresh
+    const { forceRefreshPhotos } = req.query;
     const userId = req.user.userId;
     const updates = { ...req.body, updatedAt: Date.now() };
     
-    logger.info('✏️ Updating itinerary', { itineraryId: id, userId, forceRefreshPhotos });
+    logger.info('✏️ Updating itinerary', { itineraryId: id, userId });
     
+
     // Validate itinerary ID format
     if (!id || id.length !== 24) {
       logger.warn('⚠️ Invalid itinerary ID format', { itineraryId: id, userId });
@@ -2227,15 +2228,11 @@ app.put('/api/generate-itineraries/:id', authenticateToken, async (req, res) => 
       }
     }
     
-    // Enhanced photo handling: destination changed OR forced refresh
-    const shouldRefreshPhotos = (destinationChanged || forceRefreshPhotos === 'true') && 
-                               existingItinerary.photosEnabled;
-    
-    if (shouldRefreshPhotos) {
-      const refreshReason = destinationChanged ? 'destination changed' : 'forced refresh';
-      logger.info('📸 Refreshing photos', { 
-        reason: refreshReason,
-        destination: updates.destination 
+    // Handle destination change - regenerate photos if photos are enabled
+    if (destinationChanged && existingItinerary.photosEnabled) {
+      logger.info('📸 Regenerating photos for new destination', { 
+        oldDestination: existingItinerary.destination,
+        newDestination: updates.destination 
       });
       
       try {
@@ -2265,7 +2262,7 @@ app.put('/api/generate-itineraries/:id', authenticateToken, async (req, res) => 
                   if (!activity) return activity;
                   
                   try {
-                    // Get new activity-specific photo
+                    // Get new activity-specific photo for the new destination
                     const newActivityPhoto = await getActivityPhotos(
                       updates.destination, 
                       activity.activity, 
@@ -2303,15 +2300,14 @@ app.put('/api/generate-itineraries/:id', authenticateToken, async (req, res) => 
           updates.days = enhancedDays;
         }
         
-        logger.info('✅ Photos refreshed successfully', { 
-          destination: updates.destination,
-          photoCount: newDestinationPhotos.length,
-          reason: refreshReason
+        logger.info('✅ Photos regenerated successfully for new destination', { 
+          newDestination: updates.destination,
+          photoCount: newDestinationPhotos.length 
         });
         
       } catch (photoError) {
-        logger.error('❌ Error refreshing photos:', photoError);
-        // Continue with update even if photo refresh fails
+        logger.error('❌ Error regenerating photos for new destination:', photoError);
+        // Continue with update even if photo regeneration fails
         updates.destinationPhotos = existingItinerary.destinationPhotos || [];
       }
     }
@@ -2336,11 +2332,8 @@ app.put('/api/generate-itineraries/:id', authenticateToken, async (req, res) => 
     if (datesChanged) {
       activityDescription.push('dates updated');
     }
-    if (shouldRefreshPhotos) {
-      activityDescription.push('photos refreshed');
-    }
-    if (forceRefreshPhotos === 'true' && !destinationChanged) {
-      activityDescription.push('photos manually refreshed');
+    if (destinationChanged && existingItinerary.photosEnabled) {
+      activityDescription.push('photos regenerated');
     }
     
     try {
@@ -2355,8 +2348,7 @@ app.put('/api/generate-itineraries/:id', authenticateToken, async (req, res) => 
           destination: itinerary.destination,
           destinationChanged,
           datesChanged,
-          photosRefreshed: shouldRefreshPhotos,
-          forceRefreshPhotos: forceRefreshPhotos === 'true'
+          photosRegenerated: destinationChanged && existingItinerary.photosEnabled
         }
       }).save();
     } catch (activityError) {
@@ -2369,16 +2361,10 @@ app.put('/api/generate-itineraries/:id', authenticateToken, async (req, res) => 
       userId,
       destinationChanged,
       datesChanged,
-      photosRefreshed: shouldRefreshPhotos,
-      forceRefreshPhotos: forceRefreshPhotos === 'true'
+      photosRegenerated: destinationChanged && existingItinerary.photosEnabled
     });
     
-    res.json({
-      success: true,
-      itinerary,
-      photosRefreshed: shouldRefreshPhotos,
-      message: activityDescription.length > 0 ? `Updated: ${activityDescription.join(', ')}` : 'Itinerary updated'
-    });
+    res.json(itinerary);
     
   } catch (error) {
     logger.error('❌ Itinerary update error:', error);
