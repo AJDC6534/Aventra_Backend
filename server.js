@@ -422,68 +422,84 @@ async function getActivityPhotos(destination, activity, location) {
   }
   
   try {
-    // Extract activity type for better photo search
+    // Create more specific search terms
     const activityLower = activity.toLowerCase();
-    let activityType = '';
+    let searchTerms = [];
     
-    // Map activity types to better search terms
-    const activityMappings = {
-      'museum': ['museum', 'gallery', 'exhibit'],
-      'temple': ['temple', 'shrine', 'church', 'cathedral', 'mosque'],
-      'market': ['market', 'shopping', 'bazaar', 'souk'],
-      'park': ['park', 'garden', 'botanical', 'nature'],
-      'food': ['restaurant', 'food', 'dining', 'cafe', 'cuisine'],
-      'beach': ['beach', 'seaside', 'ocean', 'coast'],
-      'mountain': ['mountain', 'hiking', 'trek', 'climb', 'peak'],
-      'historic': ['historic', 'heritage', 'ancient', 'monument'],
-      'architecture': ['architecture', 'building', 'landmark'],
-      'art': ['art', 'gallery', 'artistic', 'creative']
-    };
-    
-    // Find matching activity type
-    for (const [type, keywords] of Object.entries(activityMappings)) {
-      if (keywords.some(keyword => activityLower.includes(keyword))) {
-        activityType = type;
-        break;
-      }
+    // Add location-based searches first (most specific)
+    if (location && location.trim()) {
+      searchTerms.push(location.trim());
+      searchTerms.push(`${location.trim()} ${destination}`);
     }
     
-    // Try multiple search queries in order of specificity
-    const searchQueries = [
-      location && location.trim() ? location.trim() : null,
-      activityType ? `${destination} ${activityType}` : null,
-      `${destination} ${activity}`,
-      `${destination} attraction`,
-      destination
-    ].filter(q => q && q.trim().length > 0);
+    // Add activity-specific searches
+    if (activityLower.includes('cathedral') || activityLower.includes('church')) {
+      searchTerms.push(`${destination} cathedral`);
+      searchTerms.push(`${destination} church`);
+    } else if (activityLower.includes('museum')) {
+      searchTerms.push(`${destination} museum`);
+      searchTerms.push(`${activity} ${destination}`);
+    } else if (activityLower.includes('chocolate')) {
+      searchTerms.push(`${destination} chocolate museum`);
+      searchTerms.push(`chocolate museum`);
+    } else if (activityLower.includes('market')) {
+      searchTerms.push(`${destination} market`);
+      searchTerms.push(`${destination} shopping`);
+    } else if (activityLower.includes('restaurant') || activityLower.includes('lunch') || activityLower.includes('dinner')) {
+      searchTerms.push(`${destination} restaurant`);
+      searchTerms.push(`${destination} food`);
+    } else if (activityLower.includes('park') || activityLower.includes('garden')) {
+      searchTerms.push(`${destination} park`);
+      searchTerms.push(`${destination} garden`);
+    } else if (activityLower.includes('tower') || activityLower.includes('viewpoint')) {
+      searchTerms.push(`${destination} tower`);
+      searchTerms.push(`${destination} view`);
+    } else {
+      // Generic searches
+      searchTerms.push(`${destination} ${activity}`);
+      searchTerms.push(`${destination} attraction`);
+    }
     
-    logger.info('📸 Trying search queries for activity', { 
+    // Add fallback searches
+    searchTerms.push(`${destination} tourism`);
+    searchTerms.push(`${destination} travel`);
+    searchTerms.push(destination);
+    
+    // Remove duplicates and empty strings
+    searchTerms = [...new Set(searchTerms.filter(term => term && term.trim().length > 0))];
+    
+    logger.info('📸 Trying search terms for activity', { 
       activity, 
-      activityType, 
-      searchQueries: searchQueries.slice(0, 3)
+      searchTerms: searchTerms.slice(0, 5),
+      totalTerms: searchTerms.length
     });
     
-    for (const query of searchQueries) {
+    // Try each search term until we find photos
+    for (const searchTerm of searchTerms) {
       try {
-        const photos = await fetchPhotosForDestination(query, null, 1);
-        if (photos.length > 0 && photos[0].url) {
+        logger.debug(`📸 Trying search term: "${searchTerm}"`);
+        
+        const photos = await fetchPhotosForDestination(searchTerm, null, 1);
+        
+        if (photos && photos.length > 0 && photos[0].url) {
           logger.info('✅ Activity photo found', { 
             activity, 
-            query, 
-            photoUrl: photos[0].url.substring(0, 50) + '...'
+            searchTerm,
+            photoUrl: photos[0].url.substring(0, 50) + '...',
+            source: photos[0].source
           });
           return photos[0];
         }
       } catch (error) {
-        logger.error(`❌ Error fetching photo for query "${query}":`, error);
+        logger.error(`❌ Error fetching photo for search term "${searchTerm}":`, error);
         continue;
       }
     }
     
-    logger.warn('⚠️ No activity photo found after trying all queries', { 
+    logger.warn('⚠️ No activity photo found after trying all search terms', { 
       activity, 
-      location, 
-      searchQueries: searchQueries.slice(0, 3)
+      location,
+      searchTermsCount: searchTerms.length
     });
     return null;
     
@@ -861,16 +877,27 @@ function cleanAndParseAIResponse(aiResponse) {
       .replace(/(\w+):/g, '"$1":')
       // Fix single quotes
       .replace(/'/g, '"')
-      // Fix cost field issues - replace text values with 0
+      // Fix cost field issues - handle specific text values
+      .replace(/"cost":\s*"Free"/gi, '"cost": 0')
+      .replace(/"cost":\s*"free"/gi, '"cost": 0')
+      .replace(/"cost":\s*"No cost"/gi, '"cost": 0')
+      .replace(/"cost":\s*"Variable"/gi, '"cost": 25')
+      .replace(/"cost":\s*"Varies"/gi, '"cost": 30')
+      .replace(/"cost":\s*"Depends"/gi, '"cost": 20')
+      .replace(/"cost":\s*"Expensive"/gi, '"cost": 80')
+      .replace(/"cost":\s*"Cheap"/gi, '"cost": 10')
+      .replace(/"cost":\s*"Moderate"/gi, '"cost": 35')
+      // Fix any remaining quoted cost values
       .replace(/"cost":\s*"[^"]*"/g, '"cost": 0')
       // Fix any remaining non-numeric cost values
-      .replace(/"cost":\s*[^0-9,}\]]/g, '"cost": 0');
+      .replace(/"cost":\s*[^0-9,}\]\s]/g, '"cost": 0');
     
     logger.info('✅ AI response cleaned successfully');
     return JSON.parse(jsonStr);
     
   } catch (error) {
     logger.error('❌ Failed to clean and parse AI response:', error);
+    logger.error('❌ Raw response sample:', aiResponse.substring(0, 200));
     throw new Error(`Failed to parse AI response: ${error.message}`);
   }
 }
@@ -1099,16 +1126,7 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
   
   if (destinationPhotos.length === 0) {
     logger.error('❌ Failed to fetch any destination photos after all attempts');
-    
-    // Create fallback photos
-    destinationPhotos = [{
-      id: 'fallback-1',
-      url: 'https://via.placeholder.com/800x600/4A90E2/FFFFFF?text=' + encodeURIComponent(destination),
-      thumb: 'https://via.placeholder.com/400x300/4A90E2/FFFFFF?text=' + encodeURIComponent(destination),
-      description: `${destination} - Travel destination`,
-      photographer: 'Placeholder',
-      source: 'fallback'
-    }];
+    // Don't use placeholder photos, just continue without photos
   }
   
   // Add photos to each day and activity
@@ -1116,29 +1134,38 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
     basicItinerary.days.map(async (day, dayIndex) => {
       logger.info(`📸 Processing day ${dayIndex + 1}/${basicItinerary.days.length}`);
       
-      // Add photos to each activity
+      // Add photos to each activity with better error handling
       const enhancedActivities = await Promise.all(
         day.activities.map(async (activity, activityIndex) => {
           logger.info(`📸 Processing activity ${activityIndex + 1}/${day.activities.length}: ${activity.activity}`);
           
           try {
-            // Get activity-specific photo
-            const activityPhoto = await getActivityPhotos(destination, activity.activity, activity.location);
+            // Get activity-specific photo with timeout
+            const photoPromise = getActivityPhotos(destination, activity.activity, activity.location);
+            const timeoutPromise = new Promise((resolve) => 
+              setTimeout(() => resolve(null), 8000) // 8 second timeout
+            );
+            
+            const activityPhoto = await Promise.race([photoPromise, timeoutPromise]);
             
             const enhancedActivity = {
               ...activity,
-              photo: activityPhoto,
-              fallbackPhoto: activityPhoto ? null : destinationPhotos[activityIndex % destinationPhotos.length] || null
+              photo: activityPhoto && activityPhoto.url ? activityPhoto : null,
+              fallbackPhoto: (!activityPhoto || !activityPhoto.url) && destinationPhotos.length > 0 
+                ? destinationPhotos[activityIndex % destinationPhotos.length] 
+                : null
             };
             
-            if (activityPhoto) {
+            if (activityPhoto && activityPhoto.url) {
               logger.info('✅ Activity photo added', { 
                 activity: activity.activity, 
-                photoSource: activityPhoto.source 
+                photoSource: activityPhoto.source,
+                photoUrl: activityPhoto.url.substring(0, 50) + '...'
               });
             } else {
               logger.warn('⚠️ No activity photo found, using fallback', { 
-                activity: activity.activity 
+                activity: activity.activity,
+                hasFallback: !!enhancedActivity.fallbackPhoto
               });
             }
             
@@ -1149,7 +1176,9 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
             return {
               ...activity,
               photo: null,
-              fallbackPhoto: destinationPhotos[activityIndex % destinationPhotos.length] || null
+              fallbackPhoto: destinationPhotos.length > 0 
+                ? destinationPhotos[activityIndex % destinationPhotos.length] 
+                : null
             };
           }
         })
@@ -1158,7 +1187,9 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
       return {
         ...day,
         activities: enhancedActivities,
-        dayPhoto: destinationPhotos[dayIndex % destinationPhotos.length] || null
+        dayPhoto: destinationPhotos.length > 0 
+          ? destinationPhotos[dayIndex % destinationPhotos.length] 
+          : null
       };
     })
   );
@@ -1170,14 +1201,22 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
     photosEnabled: true
   };
   
-  logger.info('✅ AI itinerary with photos sanitization complete', { 
-    destination, 
-    daysGenerated: enhancedDays.length,
-    destinationPhotos: destinationPhotos.length,
+  // Count successful photo assignments
+  const photoStats = {
     totalActivities: enhancedDays.reduce((sum, day) => sum + day.activities.length, 0),
     activitiesWithPhotos: enhancedDays.reduce((sum, day) => 
       sum + day.activities.filter(act => act.photo && act.photo.url).length, 0
-    )
+    ),
+    activitiesWithFallback: enhancedDays.reduce((sum, day) => 
+      sum + day.activities.filter(act => !act.photo && act.fallbackPhoto && act.fallbackPhoto.url).length, 0
+    ),
+    destinationPhotos: destinationPhotos.length
+  };
+  
+  logger.info('✅ AI itinerary with photos sanitization complete', { 
+    destination, 
+    daysGenerated: enhancedDays.length,
+    photoStats
   });
   
   return finalResult;
