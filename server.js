@@ -1,4 +1,3 @@
-// server.js - Main Express.js server with Photo Integration
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -10,6 +9,66 @@ require('dotenv').config();
 // Initialize Express app
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Enhanced logging utility
+const logger = {
+  info: (message, data = null) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [INFO] ${message}`, data ? JSON.stringify(data, null, 2) : '');
+  },
+  error: (message, error = null) => {
+    const timestamp = new Date().toISOString();
+    console.error(`[${timestamp}] [ERROR] ${message}`, error ? error.stack || error.message || error : '');
+  },
+  warn: (message, data = null) => {
+    const timestamp = new Date().toISOString();
+    console.warn(`[${timestamp}] [WARN] ${message}`, data ? JSON.stringify(data, null, 2) : '');
+  },
+  debug: (message, data = null) => {
+    if (process.env.NODE_ENV === 'development') {
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] [DEBUG] ${message}`, data ? JSON.stringify(data, null, 2) : '');
+    }
+  }
+};
+
+// Log startup
+logger.info('🚀 Starting Travel Planner API...');
+logger.info('Environment:', { 
+  NODE_ENV: process.env.NODE_ENV,
+  PORT: PORT,
+  MONGODB_URI: process.env.MONGODB_URI ? '✅ Configured' : '❌ Not configured',
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY ? '✅ Configured' : '❌ Not configured',
+  UNSPLASH_ACCESS_KEY: process.env.UNSPLASH_ACCESS_KEY ? '✅ Configured' : '❌ Not configured',
+  PEXELS_API_KEY: process.env.PEXELS_API_KEY ? '✅ Configured' : '❌ Not configured',
+  PIXABAY_API_KEY: process.env.PIXABAY_API_KEY ? '✅ Configured' : '❌ Not configured'
+});
+
+// Request logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  const requestId = Math.random().toString(36).substr(2, 9);
+  
+  logger.info(`📥 Incoming Request [${requestId}]`, {
+    method: req.method,
+    url: req.url,
+    userAgent: req.get('User-Agent'),
+    ip: req.ip
+  });
+  
+  // Log response
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    logger.info(`📤 Request Complete [${requestId}]`, {
+      method: req.method,
+      url: req.url,
+      statusCode: res.statusCode,
+      duration: `${duration}ms`
+    });
+  });
+  
+  next();
+});
 
 // Middleware
 app.use((req, res, next) => {
@@ -30,13 +89,39 @@ app.use(cors({
 app.use(express.json());
 
 // MongoDB Connection
+logger.info('🔌 Connecting to MongoDB...');
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+  .then(() => {
+    logger.info('✅ MongoDB connected successfully');
+  })
+  .catch((err) => {
+    logger.error('❌ MongoDB connection failed:', err);
+    process.exit(1);
+  });
+
+// MongoDB connection event listeners
+mongoose.connection.on('connected', () => {
+  logger.info('📊 MongoDB connection established');
+});
+
+mongoose.connection.on('error', (err) => {
+  logger.error('📊 MongoDB connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  logger.warn('📊 MongoDB connection disconnected');
+});
 
 // Initialize Google Generative AI
+logger.info('🤖 Initializing Google Generative AI...');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
+
+if (genAI) {
+  logger.info('✅ Google Generative AI initialized successfully');
+} else {
+  logger.warn('⚠️ Google Generative AI not initialized - API key missing');
+}
 
 // ===== RATE LIMITER =====
 const rateLimiter = {
@@ -50,11 +135,13 @@ const rateLimiter = {
     const validRequests = userRequests.filter(time => now - time < this.windowMs);
     
     if (validRequests.length >= this.maxRequests) {
+      logger.warn('🚫 Rate limit exceeded for user:', { userId, requests: validRequests.length });
       return false;
     }
     
     validRequests.push(now);
     this.requests.set(userId, validRequests);
+    logger.debug('✅ Rate limit check passed for user:', { userId, requests: validRequests.length });
     return true;
   }
 };
@@ -91,9 +178,11 @@ const photoServices = {
 
 // Function to fetch photos from Unsplash
 async function fetchUnsplashPhotos(query, count = 3) {
+  logger.info('📸 Fetching Unsplash photos', { query, count });
+  
   try {
     if (!process.env.UNSPLASH_ACCESS_KEY) {
-      console.log('Unsplash API key not configured');
+      logger.warn('⚠️ Unsplash API key not configured');
       return [];
     }
 
@@ -104,7 +193,7 @@ async function fetchUnsplashPhotos(query, count = 3) {
       timeout: 5000
     });
 
-    return response.data.results?.map(photo => ({
+    const photos = response.data.results?.map(photo => ({
       id: photo.id,
       url: photo.urls.regular,
       thumb: photo.urls.thumb,
@@ -115,17 +204,22 @@ async function fetchUnsplashPhotos(query, count = 3) {
       source: 'unsplash'
     })) || [];
 
+    logger.info('✅ Unsplash photos fetched successfully', { query, count: photos.length });
+    return photos;
+
   } catch (error) {
-    console.error('Unsplash fetch error:', error.message);
+    logger.error('❌ Unsplash fetch error:', error);
     return [];
   }
 }
 
 // Function to fetch photos from Pexels
 async function fetchPexelsPhotos(query, count = 3) {
+  logger.info('📸 Fetching Pexels photos', { query, count });
+  
   try {
     if (!process.env.PEXELS_API_KEY) {
-      console.log('Pexels API key not configured');
+      logger.warn('⚠️ Pexels API key not configured');
       return [];
     }
 
@@ -136,7 +230,7 @@ async function fetchPexelsPhotos(query, count = 3) {
       timeout: 5000
     });
 
-    return response.data.photos?.map(photo => ({
+    const photos = response.data.photos?.map(photo => ({
       id: photo.id,
       url: photo.src.large,
       thumb: photo.src.medium,
@@ -146,17 +240,22 @@ async function fetchPexelsPhotos(query, count = 3) {
       source: 'pexels'
     })) || [];
 
+    logger.info('✅ Pexels photos fetched successfully', { query, count: photos.length });
+    return photos;
+
   } catch (error) {
-    console.error('Pexels fetch error:', error.message);
+    logger.error('❌ Pexels fetch error:', error);
     return [];
   }
 }
 
 // Function to fetch photos from Pixabay
 async function fetchPixabayPhotos(query, count = 3) {
+  logger.info('📸 Fetching Pixabay photos', { query, count });
+  
   try {
     if (!process.env.PIXABAY_API_KEY) {
-      console.log('Pixabay API key not configured');
+      logger.warn('⚠️ Pixabay API key not configured');
       return [];
     }
 
@@ -172,7 +271,7 @@ async function fetchPixabayPhotos(query, count = 3) {
     
     const response = await axios.get(url, { timeout: 5000 });
 
-    return response.data.hits?.map(photo => ({
+    const photos = response.data.hits?.map(photo => ({
       id: photo.id,
       url: photo.webformatURL,
       thumb: photo.previewURL,
@@ -181,8 +280,11 @@ async function fetchPixabayPhotos(query, count = 3) {
       source: 'pixabay'
     })) || [];
 
+    logger.info('✅ Pixabay photos fetched successfully', { query, count: photos.length });
+    return photos;
+
   } catch (error) {
-    console.error('Pixabay fetch error:', error.message);
+    logger.error('❌ Pixabay fetch error:', error);
     return [];
   }
 }
@@ -191,7 +293,7 @@ async function fetchPixabayPhotos(query, count = 3) {
 async function fetchPhotosForDestination(destination, activityType = null, count = 3) {
   const query = activityType ? `${destination} ${activityType}` : destination;
   
-  console.log(`Fetching photos for: ${query}`);
+  logger.info('📸 Fetching photos for destination', { destination, activityType, count });
   
   // Try all services in parallel with different queries
   const searchQueries = [
@@ -235,16 +337,27 @@ async function fetchPhotosForDestination(destination, activityType = null, count
     
     // Shuffle and limit results
     const shuffled = uniquePhotos.sort(() => Math.random() - 0.5);
-    return shuffled.slice(0, count);
+    const finalPhotos = shuffled.slice(0, count);
+    
+    logger.info('✅ Photos fetched successfully for destination', { 
+      destination, 
+      totalFound: allPhotos.length, 
+      uniqueFound: uniquePhotos.length,
+      finalCount: finalPhotos.length 
+    });
+    
+    return finalPhotos;
     
   } catch (error) {
-    console.error('Error fetching photos:', error);
+    logger.error('❌ Error fetching photos for destination:', error);
     return [];
   }
 }
 
 // Function to get activity-specific photos
 async function getActivityPhotos(destination, activity, location) {
+  logger.info('📸 Getting activity-specific photos', { destination, activity, location });
+  
   try {
     // Extract activity type for better photo search
     const activityLower = activity.toLowerCase();
@@ -277,13 +390,15 @@ async function getActivityPhotos(destination, activity, location) {
     for (const query of searchQueries) {
       const photos = await fetchPhotosForDestination(query, null, 1);
       if (photos.length > 0) {
+        logger.info('✅ Activity photo found', { activity, query, photoFound: true });
         return photos[0];
       }
     }
     
+    logger.warn('⚠️ No activity photo found', { activity, location });
     return null;
   } catch (error) {
-    console.error('Error getting activity photos:', error);
+    logger.error('❌ Error getting activity photos:', error);
     return null;
   }
 }
@@ -494,6 +609,8 @@ const UserActivity = mongoose.model('UserActivity', userActivitySchema);
 const CheckIn = mongoose.model('CheckIn', checkInSchema);
 const EmergencyAlert = mongoose.model('EmergencyAlert', emergencyAlertSchema);
 
+logger.info('📊 Database models created successfully');
+
 // ===== UTILITY FUNCTIONS =====
 
 // JWT Authentication Middleware
@@ -502,18 +619,25 @@ const authenticateToken = (req, res, next) => {
   const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
+    logger.warn('🔐 Authentication failed: No token provided');
     return res.sendStatus(401);
   }
 
   jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret', (err, user) => {
-    if (err) return res.sendStatus(403);
+    if (err) {
+      logger.warn('🔐 Authentication failed: Invalid token', { error: err.message });
+      return res.sendStatus(403);
+    }
     req.user = user;
+    logger.debug('✅ Authentication successful for user:', { userId: user.userId });
     next();
   });
 };
 
 // Chat Mock Response Function
 function generateIntelligentMockResponse(message, user, itinerary) {
+  logger.info('🤖 Generating mock response', { message, hasUser: !!user, hasItinerary: !!itinerary });
+  
   const lowerMessage = message.toLowerCase();
   
   if (lowerMessage.includes('tokyo') && lowerMessage.includes('3')) {
@@ -613,12 +737,18 @@ function getDefaultActivity(interests, index) {
 }
 
 function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr) {
-  console.log('🧹 Sanitizing AI itinerary data...');
-  console.log('Start date received:', startDateStr);
-  console.log('End date received:', endDateStr);
+  logger.info('🧹 Sanitizing AI itinerary data', { 
+    destination, 
+    expectedDays, 
+    budget, 
+    interests, 
+    pace,
+    startDate: startDateStr,
+    endDate: endDateStr
+  });
   
   if (!aiData || !aiData.days || !Array.isArray(aiData.days)) {
-    console.error('Invalid AI response structure');
+    logger.error('❌ Invalid AI response structure');
     return null;
   }
   
@@ -629,7 +759,6 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
   let startDate;
   try {
     if (startDateStr) {
-      // Handle both YYYY-MM-DD and ISO format
       startDate = new Date(startDateStr + (startDateStr.includes('T') ? '' : 'T00:00:00'));
       if (isNaN(startDate.getTime())) {
         throw new Error('Invalid start date');
@@ -638,11 +767,11 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
       startDate = new Date();
     }
   } catch (error) {
-    console.error('Error parsing start date:', error);
+    logger.error('❌ Error parsing start date:', error);
     startDate = new Date();
   }
   
-  console.log('Parsed start date:', startDate.toISOString());
+  logger.debug('📅 Parsed start date:', { startDate: startDate.toISOString() });
   
   // Generate the correct number of days with the correct dates
   for (let i = 0; i < expectedDays; i++) {
@@ -650,7 +779,7 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
     currentDate.setDate(startDate.getDate() + i);
     const correctDateStr = currentDate.toISOString().split('T')[0];
     
-    console.log(`Day ${i + 1} correct date: ${correctDateStr}`);
+    logger.debug(`📅 Day ${i + 1} correct date: ${correctDateStr}`);
     
     // Get AI activities for this day (if available)
     const aiDay = aiData.days[i] || { activities: [] };
@@ -685,25 +814,29 @@ function sanitizeAIItinerary(aiData, destination, expectedDays, budget, interest
       });
     }
     
-    // ✅ IMPORTANT: Use the correct date, not the AI's date
     sanitizedDays.push({
-      date: correctDateStr, // This ensures we use YOUR dates, not AI's dates
+      date: correctDateStr,
       activities: sanitizedActivities
     });
   }
   
-  console.log('Sanitization complete with correct dates');
+  logger.info('✅ AI itinerary sanitization complete', { 
+    destination, 
+    daysGenerated: sanitizedDays.length 
+  });
+  
   return { days: sanitizedDays };
 }
 
 // Enhanced sanitization function that includes photos
 async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr) {
-  console.log('🧹 Sanitizing AI itinerary data with photos...');
+  logger.info('🧹 Sanitizing AI itinerary data with photos', { destination, expectedDays });
   
   // First get the basic sanitized itinerary
   const basicItinerary = sanitizeAIItinerary(aiData, destination, expectedDays, budget, interests, pace, startDateStr, endDateStr);
   
   if (!basicItinerary) {
+    logger.error('❌ Failed to sanitize basic itinerary');
     return null;
   }
   
@@ -713,6 +846,8 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
   // Add photos to each day and activity
   const enhancedDays = await Promise.all(
     basicItinerary.days.map(async (day, dayIndex) => {
+      logger.debug(`📸 Adding photos to day ${dayIndex + 1}`);
+      
       // Add photos to each activity
       const enhancedActivities = await Promise.all(
         day.activities.map(async (activity, activityIndex) => {
@@ -723,11 +858,10 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
             return {
               ...activity,
               photo: activityPhoto,
-              // Fallback to destination photos if no activity photo found
               fallbackPhoto: activityPhoto ? null : destinationPhotos[activityIndex % destinationPhotos.length] || null
             };
           } catch (error) {
-            console.error(`Error adding photo to activity ${activityIndex}:`, error);
+            logger.error(`❌ Error adding photo to activity ${activityIndex}:`, error);
             return {
               ...activity,
               photo: null,
@@ -740,30 +874,40 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
       return {
         ...day,
         activities: enhancedActivities,
-        // Add a featured photo for the day
         dayPhoto: destinationPhotos[dayIndex % destinationPhotos.length] || null
       };
     })
   );
   
+  logger.info('✅ AI itinerary with photos sanitization complete', { 
+    destination, 
+    daysGenerated: enhancedDays.length,
+    destinationPhotos: destinationPhotos.length
+  });
+  
   return {
     ...basicItinerary,
     days: enhancedDays,
-    destinationPhotos: destinationPhotos.slice(0, 3), // Keep top 3 for general use
+    destinationPhotos: destinationPhotos.slice(0, 3),
     photosEnabled: true
   };
 }
 
 function generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr) {
-  console.log('🎭 Generating high-quality mock itinerary...');
-  console.log('Start date for mock:', startDateStr);
+  logger.info('🎭 Generating high-quality mock itinerary', { 
+    destination, 
+    days, 
+    interests, 
+    budget, 
+    pace,
+    startDate: startDateStr
+  });
   
   const budgetMultiplier = budget === 'budget' ? 0.6 : budget === 'luxury' ? 2.5 : 1;
   const activitiesPerDay = pace === 'relaxed' ? 2 : pace === 'active' ? 4 : 3;
   
   const mockDays = [];
   
-  // More robust date parsing for mock generation too
   let startDate;
   try {
     if (startDateStr) {
@@ -775,7 +919,7 @@ function generateHighQualityMockItinerary(destination, days, interests, budget, 
       startDate = new Date();
     }
   } catch (error) {
-    console.error('Error parsing start date for mock:', error);
+    logger.error('❌ Error parsing start date for mock:', error);
     startDate = new Date();
   }
   
@@ -807,13 +951,17 @@ function generateHighQualityMockItinerary(destination, days, interests, budget, 
     });
   }
   
-  console.log('Mock itinerary generated with correct dates');
+  logger.info('✅ Mock itinerary generated successfully', { 
+    destination, 
+    daysGenerated: mockDays.length 
+  });
+  
   return { days: mockDays };
 }
 
 // Enhanced mock itinerary generation with photos
 async function generateHighQualityMockItineraryWithPhotos(destination, days, interests, budget, pace, startDateStr) {
-  console.log('🎭 Generating high-quality mock itinerary with photos...');
+  logger.info('🎭 Generating high-quality mock itinerary with photos', { destination, days });
   
   // First get the basic mock itinerary
   const basicItinerary = generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr);
@@ -844,6 +992,12 @@ async function generateHighQualityMockItineraryWithPhotos(destination, days, int
     })
   );
   
+  logger.info('✅ Mock itinerary with photos generated successfully', { 
+    destination, 
+    daysGenerated: enhancedDays.length,
+    destinationPhotos: destinationPhotos.length
+  });
+  
   return {
     ...basicItinerary,
     days: enhancedDays,
@@ -856,15 +1010,19 @@ async function generateHighQualityMockItineraryWithPhotos(destination, days, int
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password } = req.body;
+    logger.info('👤 User registration attempt', { name, email });
     
     const existingUser = await User.findOne({ email });
     if (existingUser) {
+      logger.warn('⚠️ Registration failed: User already exists', { email });
       return res.status(400).json({ message: 'User already exists' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ name, email, password: hashedPassword });
     await user.save();
+    
+    logger.info('✅ User registered successfully', { userId: user._id, email });
 
     const token = jwt.sign(
       { userId: user._id, email: user.email },
@@ -878,6 +1036,7 @@ app.post('/api/auth/register', async (req, res) => {
       user: { id: user._id, name: user.name, email: user.email },
     });
   } catch (error) {
+    logger.error('❌ Registration error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -885,14 +1044,17 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+    logger.info('🔐 User login attempt', { email });
 
     const user = await User.findOne({ email });
     if (!user) {
+      logger.warn('⚠️ Login failed: User not found', { email });
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
+      logger.warn('⚠️ Login failed: Invalid password', { email });
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
@@ -902,12 +1064,15 @@ app.post('/api/auth/login', async (req, res) => {
       { expiresIn: '24h' }
     );
 
+    logger.info('✅ User logged in successfully', { userId: user._id, email });
+
     res.json({
       message: 'Login successful',
       token,
       user: { id: user._id, name: user.name, email: user.email },
     });
   } catch (error) {
+    logger.error('❌ Login error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -921,11 +1086,16 @@ app.get('/api/photos/destination/:destination', authenticateToken, async (req, r
     const count = parseInt(req.query.count) || 6;
     const activityType = req.query.type || null;
     
+    logger.info('📸 Photo API request for destination', { destination, count, activityType });
+    
     if (!destination || destination.trim().length === 0) {
+      logger.warn('⚠️ Photo API: Invalid destination parameter');
       return res.status(400).json({ message: 'Destination is required' });
     }
     
     const photos = await fetchPhotosForDestination(destination.trim(), activityType, count);
+    
+    logger.info('✅ Photo API response', { destination, foundPhotos: photos.length });
     
     res.json({
       success: true,
@@ -935,7 +1105,7 @@ app.get('/api/photos/destination/:destination', authenticateToken, async (req, r
     });
     
   } catch (error) {
-    console.error('Destination photos API error:', error);
+    logger.error('❌ Destination photos API error:', error);
     res.status(500).json({ 
       message: 'Failed to fetch destination photos',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
@@ -948,11 +1118,16 @@ app.get('/api/photos/activity', authenticateToken, async (req, res) => {
   try {
     const { destination, activity, location } = req.query;
     
+    logger.info('📸 Photo API request for activity', { destination, activity, location });
+    
     if (!destination || !activity) {
+      logger.warn('⚠️ Photo API: Missing destination or activity parameter');
       return res.status(400).json({ message: 'Destination and activity are required' });
     }
     
     const photo = await getActivityPhotos(destination, activity, location);
+    
+    logger.info('✅ Activity photo API response', { destination, activity, photoFound: !!photo });
     
     res.json({
       success: true,
@@ -963,7 +1138,7 @@ app.get('/api/photos/activity', authenticateToken, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Activity photos API error:', error);
+    logger.error('❌ Activity photos API error:', error);
     res.status(500).json({ 
       message: 'Failed to fetch activity photos',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
@@ -974,6 +1149,8 @@ app.get('/api/photos/activity', authenticateToken, async (req, res) => {
 // Route to check photo service availability
 app.get('/api/photos/health', authenticateToken, async (req, res) => {
   try {
+    logger.info('🔍 Photo service health check initiated');
+    
     const services = {
       unsplash: {
         configured: !!process.env.UNSPLASH_ACCESS_KEY,
@@ -997,9 +1174,11 @@ app.get('/api/photos/health', authenticateToken, async (req, res) => {
         fetchUnsplashPhotos('test', 1)
           .then(photos => {
             services.unsplash.status = photos.length > 0 ? 'working' : 'no_results';
+            logger.info('✅ Unsplash health check', { status: services.unsplash.status });
           })
           .catch(() => {
             services.unsplash.status = 'error';
+            logger.error('❌ Unsplash health check failed');
           })
       );
     }
@@ -1009,9 +1188,11 @@ app.get('/api/photos/health', authenticateToken, async (req, res) => {
         fetchPexelsPhotos('test', 1)
           .then(photos => {
             services.pexels.status = photos.length > 0 ? 'working' : 'no_results';
+            logger.info('✅ Pexels health check', { status: services.pexels.status });
           })
           .catch(() => {
             services.pexels.status = 'error';
+            logger.error('❌ Pexels health check failed');
           })
       );
     }
@@ -1021,27 +1202,33 @@ app.get('/api/photos/health', authenticateToken, async (req, res) => {
         fetchPixabayPhotos('test', 1)
           .then(photos => {
             services.pixabay.status = photos.length > 0 ? 'working' : 'no_results';
+            logger.info('✅ Pixabay health check', { status: services.pixabay.status });
           })
           .catch(() => {
             services.pixabay.status = 'error';
+            logger.error('❌ Pixabay health check failed');
           })
       );
     }
     
     await Promise.allSettled(testPromises);
     
+    const summary = {
+      configured: Object.values(services).filter(s => s.configured).length,
+      working: Object.values(services).filter(s => s.status === 'working').length,
+      total: 3
+    };
+    
+    logger.info('✅ Photo service health check complete', { services, summary });
+    
     res.json({
       success: true,
       services,
-      summary: {
-        configured: Object.values(services).filter(s => s.configured).length,
-        working: Object.values(services).filter(s => s.status === 'working').length,
-        total: 3
-      }
+      summary
     });
     
   } catch (error) {
-    console.error('Photo health check error:', error);
+    logger.error('❌ Photo health check error:', error);
     res.status(500).json({ 
       message: 'Photo service health check failed',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
@@ -1054,15 +1241,17 @@ app.post('/api/photos/download', authenticateToken, async (req, res) => {
   try {
     const { photoId, source, downloadUrl } = req.body;
     
+    logger.info('📸 Photo download tracking request', { photoId, source, userId: req.user.userId });
+    
     if (source === 'unsplash' && downloadUrl && process.env.UNSPLASH_ACCESS_KEY) {
       // Trigger download tracking for Unsplash (required by their API terms)
       try {
         await axios.get(downloadUrl, {
           headers: photoServices.unsplash.headers
         });
-        console.log(`Unsplash download tracked for photo ${photoId}`);
+        logger.info(`✅ Unsplash download tracked for photo ${photoId}`);
       } catch (error) {
-        console.error('Unsplash download tracking error:', error);
+        logger.error('❌ Unsplash download tracking error:', error);
       }
     }
     
@@ -1076,10 +1265,12 @@ app.post('/api/photos/download', authenticateToken, async (req, res) => {
       metadata: { photoId, source }
     }).save();
     
+    logger.info('✅ Photo download tracked successfully', { photoId, source, userId: req.user.userId });
+    
     res.json({ success: true, message: 'Download tracked successfully' });
     
   } catch (error) {
-    console.error('Photo download tracking error:', error);
+    logger.error('❌ Photo download tracking error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1088,6 +1279,8 @@ app.post('/api/photos/download', authenticateToken, async (req, res) => {
 app.get('/api/photos/:source/:photoId/attribution', async (req, res) => {
   try {
     const { source, photoId } = req.params;
+    
+    logger.info('📸 Photo attribution request', { source, photoId });
     
     let attribution = {};
     
@@ -1120,8 +1313,11 @@ app.get('/api/photos/:source/:photoId/attribution', async (req, res) => {
         break;
         
       default:
+        logger.warn('⚠️ Invalid photo source requested', { source });
         return res.status(400).json({ message: 'Invalid photo source' });
     }
+    
+    logger.info('✅ Photo attribution provided', { source, photoId });
     
     res.json({
       source,
@@ -1130,7 +1326,7 @@ app.get('/api/photos/:source/:photoId/attribution', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Photo attribution error:', error);
+    logger.error('❌ Photo attribution error:', error);
     res.status(500).json({ 
       message: 'Failed to get photo attribution',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
@@ -1141,16 +1337,20 @@ app.get('/api/photos/:source/:photoId/attribution', async (req, res) => {
 // ===== USER PROFILE ROUTES =====
 app.get('/api/users/profile', authenticateToken, async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId).select('-password');
+    const userId = req.user.userId;
+    logger.info('👤 Profile fetch request', { userId });
+    
+    const user = await User.findById(userId).select('-password');
     
     if (!user) {
+      logger.warn('⚠️ Profile fetch: User not found', { userId });
       return res.status(404).json({ message: 'User not found' });
     }
     
     // Calculate user statistics
-    const totalTrips = await Itinerary.countDocuments({ userId: req.user.userId });
+    const totalTrips = await Itinerary.countDocuments({ userId });
     const completedTrips = await Itinerary.find({ 
-      userId: req.user.userId,
+      userId,
       endDate: { $lt: new Date() }
     });
     
@@ -1167,47 +1367,60 @@ app.get('/api/users/profile', authenticateToken, async (req, res) => {
     }, 0);
     
     // Update user statistics
-    await User.findByIdAndUpdate(req.user.userId, {
+    await User.findByIdAndUpdate(userId, {
       totalTrips,
       avgRating: Math.round(avgRating * 10) / 10,
       daysTraveled
     });
     
+    logger.info('✅ Profile data retrieved and updated', { 
+      userId, 
+      totalTrips, 
+      avgRating, 
+      daysTraveled 
+    });
+    
     // Return updated user data
-    const updatedUser = await User.findById(req.user.userId).select('-password');
+    const updatedUser = await User.findById(userId).select('-password');
     res.json(updatedUser);
     
   } catch (error) {
-    console.error('Profile fetch error:', error);
+    logger.error('❌ Profile fetch error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 app.put('/api/users/profile', authenticateToken, async (req, res) => {
   try {
+    const userId = req.user.userId;
     const updates = { ...req.body, updatedAt: Date.now() };
     
+    logger.info('✏️ Profile update request', { userId, updates });
+    
     const user = await User.findByIdAndUpdate(
-      req.user.userId,
+      userId,
       updates,
       { new: true, runValidators: true }
     ).select('-password');
     
     if (!user) {
+      logger.warn('⚠️ Profile update: User not found', { userId });
       return res.status(404).json({ message: 'User not found' });
     }
     
     // Log activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'profile_updated',
       title: 'Profile updated',
       description: 'User profile information has been updated',
     }).save();
     
+    logger.info('✅ Profile updated successfully', { userId });
+    
     res.json(user);
   } catch (error) {
-    console.error('Profile update error:', error);
+    logger.error('❌ Profile update error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1216,9 +1429,13 @@ app.put('/api/users/profile', authenticateToken, async (req, res) => {
 app.put('/api/users/preferences', authenticateToken, async (req, res) => {
   try {
     const { travelStyle, budgetRange, interests, pace } = req.body;
+    const userId = req.user.userId;
+    
+    logger.info('🎯 User preferences update request', { userId, travelStyle, budgetRange, interests, pace });
     
     // Validate interests array
     if (interests && !Array.isArray(interests)) {
+      logger.warn('⚠️ Invalid interests format', { userId, interests });
       return res.status(400).json({ message: 'Interests must be an array' });
     }
     
@@ -1233,28 +1450,31 @@ app.put('/api/users/preferences', authenticateToken, async (req, res) => {
     };
     
     const user = await User.findByIdAndUpdate(
-      req.user.userId,
+      userId,
       preferencesUpdate,
       { new: true, runValidators: true }
     ).select('-password');
     
     if (!user) {
+      logger.warn('⚠️ Preferences update: User not found', { userId });
       return res.status(404).json({ message: 'User not found' });
     }
     
     // Log activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'preferences_updated',
       title: 'Travel preferences updated',
       description: `Updated travel style: ${travelStyle}, budget: ${budgetRange}, interests: ${interests?.join(', ') || 'none'}`,
       icon: '🎯'
     }).save();
     
+    logger.info('✅ User preferences updated successfully', { userId });
+    
     res.json(user.preferences);
     
   } catch (error) {
-    console.error('Preferences update error:', error);
+    logger.error('❌ Preferences update error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1263,18 +1483,24 @@ app.put('/api/users/preferences', authenticateToken, async (req, res) => {
 app.put('/api/users/safety-settings', authenticateToken, async (req, res) => {
   try {
     const { emergencyContacts, locationSharing, medicalInfo, travelPreferences } = req.body;
+    const userId = req.user.userId;
+    
+    logger.info('🛡️ Safety settings update request', { userId, emergencyContactsCount: emergencyContacts?.length });
     
     // Validate emergency contacts
     if (!emergencyContacts || !Array.isArray(emergencyContacts) || emergencyContacts.length === 0) {
+      logger.warn('⚠️ Invalid emergency contacts', { userId });
       return res.status(400).json({ message: 'At least one emergency contact is required' });
     }
     
     // Validate required fields for each contact
     for (const contact of emergencyContacts) {
       if (!contact.name || !contact.name.trim()) {
+        logger.warn('⚠️ Missing contact name', { userId });
         return res.status(400).json({ message: 'Contact name is required' });
       }
       if (!contact.phone || !contact.phone.trim()) {
+        logger.warn('⚠️ Missing contact phone', { userId });
         return res.status(400).json({ message: 'Contact phone number is required' });
       }
     }
@@ -1311,23 +1537,26 @@ app.put('/api/users/safety-settings', authenticateToken, async (req, res) => {
     };
     
     const user = await User.findByIdAndUpdate(
-      req.user.userId,
+      userId,
       updates,
       { new: true, runValidators: true }
     ).select('-password');
     
     if (!user) {
+      logger.warn('⚠️ Safety settings update: User not found', { userId });
       return res.status(404).json({ message: 'User not found' });
     }
     
     // Log activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'safety_updated',
       title: 'Safety settings updated',
       description: `Updated emergency contacts (${emergencyContacts.length}), location sharing: ${locationSharing?.enabled ? 'enabled' : 'disabled'}`,
       icon: '🛡️'
     }).save();
+    
+    logger.info('✅ Safety settings updated successfully', { userId });
     
     res.json({
       emergencyContacts: user.emergencyContacts,
@@ -1337,7 +1566,7 @@ app.put('/api/users/safety-settings', authenticateToken, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Safety settings update error:', error);
+    logger.error('❌ Safety settings update error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1346,8 +1575,12 @@ app.put('/api/users/safety-settings', authenticateToken, async (req, res) => {
 app.put('/api/users/location', authenticateToken, async (req, res) => {
   try {
     const { latitude, longitude, address, accuracy } = req.body;
+    const userId = req.user.userId;
+    
+    logger.info('📍 Location update request', { userId, latitude, longitude, address });
     
     if (!latitude || !longitude) {
+      logger.warn('⚠️ Missing location coordinates', { userId });
       return res.status(400).json({ message: 'Latitude and longitude are required' });
     }
     
@@ -1363,28 +1596,31 @@ app.put('/api/users/location', authenticateToken, async (req, res) => {
     };
     
     const user = await User.findByIdAndUpdate(
-      req.user.userId,
+      userId,
       locationUpdate,
       { new: true }
     ).select('currentLocation');
     
     if (!user) {
+      logger.warn('⚠️ Location update: User not found', { userId });
       return res.status(404).json({ message: 'User not found' });
     }
     
     // Log activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'location_updated',
       title: 'Location updated',
       description: `Location updated to ${address || 'coordinates'}`,
       icon: '📍'
     }).save();
     
+    logger.info('✅ Location updated successfully', { userId });
+    
     res.json({ success: true, location: user.currentLocation });
     
   } catch (error) {
-    console.error('Location update error:', error);
+    logger.error('❌ Location update error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1393,13 +1629,17 @@ app.put('/api/users/location', authenticateToken, async (req, res) => {
 app.post('/api/users/check-in', authenticateToken, async (req, res) => {
   try {
     const { location, status, message, automatic } = req.body;
+    const userId = req.user.userId;
+    
+    logger.info('✅ Check-in request', { userId, status, automatic, address: location?.address });
     
     if (!location || !location.latitude || !location.longitude) {
+      logger.warn('⚠️ Check-in missing location', { userId });
       return res.status(400).json({ message: 'Location is required for check-in' });
     }
     
     const checkIn = new CheckIn({
-      userId: req.user.userId,
+      userId,
       location: {
         latitude: parseFloat(location.latitude),
         longitude: parseFloat(location.longitude),
@@ -1414,7 +1654,7 @@ app.post('/api/users/check-in', authenticateToken, async (req, res) => {
     await checkIn.save();
     
     // Update user's current location
-    await User.findByIdAndUpdate(req.user.userId, {
+    await User.findByIdAndUpdate(userId, {
       currentLocation: {
         latitude: parseFloat(location.latitude),
         longitude: parseFloat(location.longitude),
@@ -1426,7 +1666,7 @@ app.post('/api/users/check-in', authenticateToken, async (req, res) => {
     
     // Log activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'check_in',
       title: automatic ? 'Automatic check-in' : 'Manual check-in',
       description: `Checked in from ${location.address || 'current location'} - Status: ${status || 'safe'}`,
@@ -1434,10 +1674,12 @@ app.post('/api/users/check-in', authenticateToken, async (req, res) => {
       metadata: { location, status }
     }).save();
     
+    logger.info('✅ Check-in completed successfully', { userId, checkInId: checkIn._id });
+    
     res.json({ success: true, checkIn });
     
   } catch (error) {
-    console.error('Check-in error:', error);
+    logger.error('❌ Check-in error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1446,8 +1688,12 @@ app.post('/api/users/check-in', authenticateToken, async (req, res) => {
 app.post('/api/emergency/alert', authenticateToken, async (req, res) => {
   try {
     const { type, location, emergencyContacts, message } = req.body;
+    const userId = req.user.userId;
+    
+    logger.info('🚨 Emergency alert request', { userId, type, contactsCount: emergencyContacts?.length });
     
     if (!emergencyContacts || !Array.isArray(emergencyContacts) || emergencyContacts.length === 0) {
+      logger.warn('⚠️ Emergency alert missing contacts', { userId });
       return res.status(400).json({ message: 'Emergency contacts are required' });
     }
     
@@ -1457,11 +1703,12 @@ app.post('/api/emergency/alert', authenticateToken, async (req, res) => {
     );
     
     if (validContacts.length === 0) {
+      logger.warn('⚠️ Emergency alert no valid contacts', { userId });
       return res.status(400).json({ message: 'At least one valid emergency contact is required' });
     }
     
     const alert = new EmergencyAlert({
-      userId: req.user.userId,
+      userId,
       alertType: type || 'other',
       location: location ? {
         latitude: parseFloat(location.latitude),
@@ -1488,7 +1735,7 @@ app.post('/api/emergency/alert', authenticateToken, async (req, res) => {
     
     // Log critical activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'emergency_alert',
       title: '🚨 EMERGENCY ALERT SENT',
       description: `Emergency alert (${type || 'other'}) sent to ${validContacts.length} contacts`,
@@ -1501,6 +1748,8 @@ app.post('/api/emergency/alert', authenticateToken, async (req, res) => {
       }
     }).save();
     
+    logger.info('🚨 Emergency alert sent successfully', { userId, alertId: alert._id, contactsNotified: validContacts.length });
+    
     res.json({ 
       success: true, 
       alertId: alert._id,
@@ -1509,7 +1758,7 @@ app.post('/api/emergency/alert', authenticateToken, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Emergency alert error:', error);
+    logger.error('❌ Emergency alert error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1519,9 +1768,12 @@ app.get('/api/users/activity', authenticateToken, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
     const offset = parseInt(req.query.offset) || 0;
+    const userId = req.user.userId;
+    
+    logger.info('📋 User activity fetch request', { userId, limit, offset });
     
     const activities = await UserActivity
-      .find({ userId: req.user.userId })
+      .find({ userId })
       .sort({ createdAt: -1 })
       .skip(offset)
       .limit(limit)
@@ -1537,10 +1789,12 @@ app.get('/api/users/activity', authenticateToken, async (req, res) => {
       metadata: activity.metadata
     }));
     
+    logger.info('✅ User activity fetched successfully', { userId, count: formattedActivities.length });
+    
     res.json(formattedActivities);
     
   } catch (error) {
-    console.error('Activity fetch error:', error);
+    logger.error('❌ Activity fetch error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1550,11 +1804,14 @@ app.get('/api/users/travel-history', authenticateToken, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 20;
     const offset = parseInt(req.query.offset) || 0;
+    const userId = req.user.userId;
+    
+    logger.info('🧳 Travel history fetch request', { userId, limit, offset });
     
     // Get completed trips (where end date is in the past)
     const trips = await Itinerary
       .find({ 
-        userId: req.user.userId,
+        userId,
         endDate: { $lt: new Date() }
       })
       .sort({ endDate: -1 })
@@ -1577,10 +1834,12 @@ app.get('/api/users/travel-history', authenticateToken, async (req, res) => {
       destinationPhotos: trip.destinationPhotos || []
     }));
     
+    logger.info('✅ Travel history fetched successfully', { userId, count: formattedTrips.length });
+    
     res.json(formattedTrips);
     
   } catch (error) {
-    console.error('Travel history fetch error:', error);
+    logger.error('❌ Travel history fetch error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1589,24 +1848,30 @@ app.get('/api/users/travel-history', authenticateToken, async (req, res) => {
 app.put('/api/itineraries/:id/rate', authenticateToken, async (req, res) => {
   try {
     const { rating } = req.body;
+    const userId = req.user.userId;
+    const itineraryId = req.params.id;
+    
+    logger.info('⭐ Trip rating request', { userId, itineraryId, rating });
     
     if (!rating || rating < 1 || rating > 5) {
+      logger.warn('⚠️ Invalid rating value', { userId, rating });
       return res.status(400).json({ message: 'Rating must be between 1 and 5' });
     }
     
     const itinerary = await Itinerary.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user.userId },
+      { _id: itineraryId, userId },
       { rating: parseInt(rating), updatedAt: Date.now() },
       { new: true }
     );
     
     if (!itinerary) {
+      logger.warn('⚠️ Itinerary not found for rating', { userId, itineraryId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
     // Log activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'trip_rated',
       title: 'Trip rated',
       description: `Rated "${itinerary.title}" ${rating} stars`,
@@ -1619,12 +1884,14 @@ app.put('/api/itineraries/:id/rate', authenticateToken, async (req, res) => {
     }).save();
     
     // Update user's average rating
-    await updateUserStats(req.user.userId);
+    await updateUserStats(userId);
+    
+    logger.info('✅ Trip rated successfully', { userId, itineraryId, rating });
     
     res.json({ success: true, rating: parseInt(rating) });
     
   } catch (error) {
-    console.error('Trip rating error:', error);
+    logger.error('❌ Trip rating error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1634,18 +1901,23 @@ app.get('/api/users/check-ins', authenticateToken, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
     const offset = parseInt(req.query.offset) || 0;
+    const userId = req.user.userId;
+    
+    logger.info('📍 Check-in history fetch request', { userId, limit, offset });
     
     const checkIns = await CheckIn
-      .find({ userId: req.user.userId })
+      .find({ userId })
       .sort({ timestamp: -1 })
       .skip(offset)
       .limit(limit)
       .lean();
     
+    logger.info('✅ Check-in history fetched successfully', { userId, count: checkIns.length });
+    
     res.json(checkIns);
     
   } catch (error) {
-    console.error('Check-ins fetch error:', error);
+    logger.error('❌ Check-ins fetch error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1655,18 +1927,23 @@ app.get('/api/emergency/alerts', authenticateToken, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
     const offset = parseInt(req.query.offset) || 0;
+    const userId = req.user.userId;
+    
+    logger.info('🚨 Emergency alerts fetch request', { userId, limit, offset });
     
     const alerts = await EmergencyAlert
-      .find({ userId: req.user.userId })
+      .find({ userId })
       .sort({ createdAt: -1 })
       .skip(offset)
       .limit(limit)
       .lean();
     
+    logger.info('✅ Emergency alerts fetched successfully', { userId, count: alerts.length });
+    
     res.json(alerts);
     
   } catch (error) {
-    console.error('Emergency alerts fetch error:', error);
+    logger.error('❌ Emergency alerts fetch error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1674,8 +1951,13 @@ app.get('/api/emergency/alerts', authenticateToken, async (req, res) => {
 // ===== RESOLVE EMERGENCY ALERT ROUTE =====
 app.put('/api/emergency/alerts/:id/resolve', authenticateToken, async (req, res) => {
   try {
+    const alertId = req.params.id;
+    const userId = req.user.userId;
+    
+    logger.info('✅ Emergency alert resolve request', { userId, alertId });
+    
     const alert = await EmergencyAlert.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user.userId },
+      { _id: alertId, userId },
       { 
         status: 'resolved',
         resolvedAt: new Date()
@@ -1684,12 +1966,13 @@ app.put('/api/emergency/alerts/:id/resolve', authenticateToken, async (req, res)
     );
     
     if (!alert) {
+      logger.warn('⚠️ Emergency alert not found for resolve', { userId, alertId });
       return res.status(404).json({ message: 'Emergency alert not found' });
     }
     
     // Log activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'emergency_resolved',
       title: 'Emergency alert resolved',
       description: `Emergency alert resolved - ${alert.alertType}`,
@@ -1697,10 +1980,12 @@ app.put('/api/emergency/alerts/:id/resolve', authenticateToken, async (req, res)
       metadata: { alertId: alert._id }
     }).save();
     
+    logger.info('✅ Emergency alert resolved successfully', { userId, alertId });
+    
     res.json({ success: true, alert });
     
   } catch (error) {
-    console.error('Emergency alert resolve error:', error);
+    logger.error('❌ Emergency alert resolve error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1708,6 +1993,8 @@ app.put('/api/emergency/alerts/:id/resolve', authenticateToken, async (req, res)
 // ===== HELPER FUNCTION TO UPDATE USER STATS =====
 async function updateUserStats(userId) {
   try {
+    logger.info('📊 Updating user stats', { userId });
+    
     // Calculate user statistics
     const totalTrips = await Itinerary.countDocuments({ userId });
     const completedTrips = await Itinerary.find({ 
@@ -1740,64 +2027,90 @@ async function updateUserStats(userId) {
       updatedAt: Date.now()
     });
     
+    logger.info('✅ User stats updated successfully', { userId, totalTrips, avgRating, daysTraveled, countriesVisited });
+    
   } catch (error) {
-    console.error('Error updating user stats:', error);
+    logger.error('❌ Error updating user stats:', error);
   }
 }
 
 // ===== ITINERARY ROUTES =====
 app.post('/api/itineraries', authenticateToken, async (req, res) => {
   try {
-    const itinerary = new Itinerary({
-      ...req.body,
-      userId: req.user.userId,
+    const userId = req.user.userId;
+    const itineraryData = { ...req.body, userId };
+    
+    logger.info('📝 Creating new itinerary', { userId, destination: req.body.destination });
+    
+    const itinerary = new Itinerary(itineraryData);
+    await itinerary.save();
+    
+    logger.info('✅ Itinerary created successfully', { 
+      itineraryId: itinerary._id, 
+      userId, 
+      destination: itinerary.destination 
     });
     
-    await itinerary.save();
     res.status(201).json(itinerary);
   } catch (error) {
+    logger.error('❌ Itinerary creation error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 app.get('/api/itineraries', authenticateToken, async (req, res) => {
   try {
-    const itineraries = await Itinerary.find({ userId: req.user.userId })
-      .sort({ createdAt: -1 });
+    const userId = req.user.userId;
+    logger.info('📋 Fetching user itineraries', { userId });
+    
+    const itineraries = await Itinerary.find({ userId }).sort({ createdAt: -1 });
+    
+    logger.info('✅ Itineraries fetched successfully', { 
+      userId, 
+      count: itineraries.length 
+    });
+    
     res.json(itineraries);
   } catch (error) {
+    logger.error('❌ Itineraries fetch error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 app.get('/api/itineraries/:id', authenticateToken, async (req, res) => {
   try {
-    const itinerary = await Itinerary.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const { id } = req.params;
+    const userId = req.user.userId;
+    
+    logger.info('📋 Fetching specific itinerary', { itineraryId: id, userId });
+    
+    const itinerary = await Itinerary.findOne({ _id: id, userId });
     
     if (!itinerary) {
+      logger.warn('⚠️ Itinerary not found', { itineraryId: id, userId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
+    logger.info('✅ Itinerary fetched successfully', { itineraryId: id, userId });
     res.json(itinerary);
   } catch (error) {
+    logger.error('❌ Itinerary fetch error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
   try {
+    const { id } = req.params;
+    const userId = req.user.userId;
     const updates = { ...req.body, updatedAt: Date.now() };
     
-    // If dates have changed, we need to update the daily structure
-    const existingItinerary = await Itinerary.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    logger.info('✏️ Updating itinerary', { itineraryId: id, userId });
+    
+    const existingItinerary = await Itinerary.findOne({ _id: id, userId });
     
     if (!existingItinerary) {
+      logger.warn('⚠️ Itinerary not found for update', { itineraryId: id, userId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
@@ -1808,7 +2121,12 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
     const newEndDate = new Date(updates.endDate).toISOString().split('T')[0];
     
     if (oldStartDate !== newStartDate || oldEndDate !== newEndDate) {
-      console.log('Dates changed, updating day structure...');
+      logger.info('📅 Dates changed, updating day structure', { 
+        oldStartDate, 
+        newStartDate, 
+        oldEndDate, 
+        newEndDate 
+      });
       
       // Calculate new duration
       const newDuration = Math.ceil((new Date(newEndDate) - new Date(newStartDate)) / (1000 * 60 * 60 * 24)) + 1;
@@ -1842,18 +2160,19 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
     }
     
     const itinerary = await Itinerary.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user.userId },
+      { _id: id, userId },
       updates,
       { new: true, runValidators: true }
     );
     
     if (!itinerary) {
+      logger.warn('⚠️ Itinerary update failed', { itineraryId: id, userId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
     // Log activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'itinerary_updated',
       title: 'Itinerary updated',
       description: `Updated "${itinerary.title}" itinerary`,
@@ -1865,26 +2184,32 @@ app.put('/api/itineraries/:id', authenticateToken, async (req, res) => {
       }
     }).save();
     
+    logger.info('✅ Itinerary updated successfully', { itineraryId: id, userId });
     res.json(itinerary);
   } catch (error) {
-    console.error('Itinerary update error:', error);
+    logger.error('❌ Itinerary update error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 app.delete('/api/itineraries/:id', authenticateToken, async (req, res) => {
   try {
-    const itinerary = await Itinerary.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
+    const { id } = req.params;
+    const userId = req.user.userId;
+    
+    logger.info('🗑️ Deleting itinerary', { itineraryId: id, userId });
+    
+    const itinerary = await Itinerary.findOneAndDelete({ _id: id, userId });
     
     if (!itinerary) {
+      logger.warn('⚠️ Itinerary not found for deletion', { itineraryId: id, userId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
+    logger.info('✅ Itinerary deleted successfully', { itineraryId: id, userId });
     res.json({ message: 'Itinerary deleted successfully' });
   } catch (error) {
+    logger.error('❌ Itinerary deletion error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -1895,7 +2220,16 @@ app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
     const { destination, startDate, endDate, interests, budget, pace, includePhotos = true } = req.body;
     const userId = req.user.userId;
     
-    console.log('Itinerary generation request:', { destination, startDate, endDate, interests, budget, pace, includePhotos });
+    logger.info('🎯 Itinerary generation request', { 
+      userId, 
+      destination, 
+      startDate, 
+      endDate, 
+      interests, 
+      budget, 
+      pace, 
+      includePhotos 
+    });
     
     const days = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
     
@@ -1904,15 +2238,12 @@ app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
     let provider = 'mock';
     
     // Check if we can use Gemini
-    const hasValidKey = process.env.GEMINI_API_KEY && 
-                       process.env.GEMINI_API_KEY  &&
-                       genAI;
-    
+    const hasValidKey = process.env.GEMINI_API_KEY && genAI;
     const withinRateLimit = rateLimiter.isAllowed(userId);
     
     if (hasValidKey && withinRateLimit) {
       try {
-        console.log('Attempting Gemini AI generation...');
+        logger.info('🤖 Attempting Gemini AI generation');
         
         const prompt = `You are a travel expert. Create a ${days}-day itinerary for ${destination}.
 
@@ -1957,7 +2288,7 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
         const response = await result.response;
         const geminiResponse = response.text();
         
-        console.log('Gemini responded, processing...');
+        logger.info('✅ Gemini AI responded successfully');
         
         // Extract and clean JSON
         let jsonStr = geminiResponse.trim();
@@ -1968,28 +2299,26 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
           jsonStr = jsonMatch[0];
         }
         
-        console.log('Parsing AI response...');
         let aiItinerary = JSON.parse(jsonStr);
         
         // Validate and sanitize the data with photos
         if (includePhotos) {
-          console.log('Adding photos to AI-generated itinerary...');
+          logger.info('📸 Adding photos to AI-generated itinerary');
           generatedItinerary = await sanitizeAIItineraryWithPhotos(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
         } else {
           generatedItinerary = sanitizeAIItinerary(aiItinerary, destination, days, budget, interests, pace, startDate, endDate);
         }
         
         if (generatedItinerary && generatedItinerary.days && generatedItinerary.days.length > 0) {
-            useAI = true;
-            provider = 'gemini';
-            console.log('AI itinerary with photos generated successfully!');
+          useAI = true;
+          provider = 'gemini';
+          logger.info('✅ AI itinerary generated successfully');
         } else {
           throw new Error('Invalid itinerary structure from AI');
         }
         
       } catch (aiError) {
-        console.error('AI generation failed:', aiError.message);
-        console.log('Falling back to mock generation...');
+        logger.error('❌ AI generation failed, falling back to mock:', aiError);
         
         if (includePhotos) {
           generatedItinerary = await generateHighQualityMockItineraryWithPhotos(destination, days, interests, budget, pace, startDate);
@@ -2000,9 +2329,9 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       }
     } else {
       if (!hasValidKey) {
-        console.log('No AI key configured, using mock generation');
+        logger.warn('⚠️ No AI key configured, using mock generation');
       } else {
-        console.log('Rate limited, using mock generation');
+        logger.warn('⚠️ Rate limited, using mock generation');
       }
       
       if (includePhotos) {
@@ -2018,7 +2347,7 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       throw new Error('Failed to generate valid itinerary');
     }
     
-    console.log('Saving itinerary to database...');
+    logger.info('💾 Saving itinerary to database');
     
     // Create and save the itinerary
     const itinerary = new Itinerary({
@@ -2028,20 +2357,16 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       startDate,
       endDate,
       budget: budget === 'budget' ? 500 : budget === 'mid-range' ? 1500 : 3000,
-      preferences: {
-        interests,
-        pace,
-      },
+      preferences: { interests, pace },
       days: generatedItinerary.days,
       aiGenerated: useAI,
-      // Add photo metadata
       photosEnabled: includePhotos,
       destinationPhotos: generatedItinerary.destinationPhotos || [],
     });
     
     const savedItinerary = await itinerary.save();
     
-    // Log activity with photo info
+    // Log activity
     await new UserActivity({
       userId,
       type: 'itinerary_generated',
@@ -2057,7 +2382,13 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       }
     }).save();
     
-    console.log('Itinerary saved successfully!');
+    logger.info('✅ Itinerary generation completed successfully', { 
+      itineraryId: savedItinerary._id,
+      userId,
+      destination,
+      provider,
+      photosEnabled: includePhotos
+    });
     
     res.json({
       ...savedItinerary.toObject(),
@@ -2074,7 +2405,7 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
     });
     
   } catch (error) {
-    console.error('Itinerary generation error:', error);
+    logger.error('❌ Itinerary generation error:', error);
     res.status(500).json({ 
       message: 'Failed to generate itinerary',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
@@ -2085,16 +2416,22 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
 // ===== ADD PHOTOS TO EXISTING ITINERARY ROUTE =====
 app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) => {
   try {
+    const itineraryId = req.params.id;
+    const userId = req.user.userId;
+    
+    logger.info('📸 Add photos to existing itinerary request', { userId, itineraryId });
+    
     const itinerary = await Itinerary.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
+      _id: itineraryId,
+      userId,
     });
     
     if (!itinerary) {
+      logger.warn('⚠️ Itinerary not found for photo addition', { userId, itineraryId });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
-    console.log(`Adding photos to existing itinerary: ${itinerary.title}`);
+    logger.info(`📸 Adding photos to existing itinerary: ${itinerary.title}`);
     
     // Get destination photos
     const destinationPhotos = await fetchPhotosForDestination(itinerary.destination, null, 5);
@@ -2129,7 +2466,7 @@ app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) 
     
     // Update the itinerary
     const updatedItinerary = await Itinerary.findByIdAndUpdate(
-      req.params.id,
+      itineraryId,
       {
         days: enhancedDays,
         destinationPhotos: destinationPhotos.slice(0, 3),
@@ -2141,7 +2478,7 @@ app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) 
     
     // Log activity
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'photos_added',
       title: 'Photos added to itinerary',
       description: `Added photos to "${itinerary.title}"`,
@@ -2152,6 +2489,8 @@ app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) 
       }
     }).save();
     
+    logger.info('✅ Photos added to itinerary successfully', { userId, itineraryId, photoCount: destinationPhotos.length });
+    
     res.json({
       success: true,
       message: 'Photos added successfully',
@@ -2160,7 +2499,7 @@ app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) 
     });
     
   } catch (error) {
-    console.error('Add photos error:', error);
+    logger.error('❌ Add photos error:', error);
     res.status(500).json({ 
       message: 'Failed to add photos to itinerary',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
@@ -2172,13 +2511,17 @@ app.post('/api/itineraries/:id/add-photos', authenticateToken, async (req, res) 
 app.post('/api/itineraries/:id/days/:dayIndex/activities/:activityIndex/refresh-photo', authenticateToken, async (req, res) => {
   try {
     const { id, dayIndex, activityIndex } = req.params;
+    const userId = req.user.userId;
+    
+    logger.info('🔄 Refresh activity photo request', { userId, itineraryId: id, dayIndex, activityIndex });
     
     const itinerary = await Itinerary.findOne({
       _id: id,
-      userId: req.user.userId,
+      userId,
     });
     
     if (!itinerary) {
+      logger.warn('⚠️ Itinerary not found for photo refresh', { userId, itineraryId: id });
       return res.status(404).json({ message: 'Itinerary not found' });
     }
     
@@ -2186,6 +2529,7 @@ app.post('/api/itineraries/:id/days/:dayIndex/activities/:activityIndex/refresh-
     const actIdx = parseInt(activityIndex);
     
     if (!itinerary.days[dayIdx] || !itinerary.days[dayIdx].activities[actIdx]) {
+      logger.warn('⚠️ Activity not found for photo refresh', { userId, dayIdx, actIdx });
       return res.status(404).json({ message: 'Activity not found' });
     }
     
@@ -2200,6 +2544,8 @@ app.post('/api/itineraries/:id/days/:dayIndex/activities/:activityIndex/refresh-
     
     await itinerary.save();
     
+    logger.info('✅ Activity photo refreshed successfully', { userId, itineraryId: id, dayIdx, actIdx });
+    
     res.json({
       success: true,
       message: 'Activity photo refreshed',
@@ -2207,7 +2553,7 @@ app.post('/api/itineraries/:id/days/:dayIndex/activities/:activityIndex/refresh-
     });
     
   } catch (error) {
-    console.error('Refresh photo error:', error);
+    logger.error('❌ Refresh photo error:', error);
     res.status(500).json({ 
       message: 'Failed to refresh photo',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
@@ -2219,8 +2565,12 @@ app.post('/api/itineraries/:id/days/:dayIndex/activities/:activityIndex/refresh-
 app.post('/api/photos/batch-operations', authenticateToken, async (req, res) => {
   try {
     const { operation, destinations, count = 3 } = req.body;
+    const userId = req.user.userId;
+    
+    logger.info('📸 Batch photo operations request', { userId, operation, destinations, count });
     
     if (!operation || !destinations || !Array.isArray(destinations)) {
+      logger.warn('⚠️ Invalid batch photo operation parameters', { userId, operation, destinations });
       return res.status(400).json({ message: 'Operation and destinations array are required' });
     }
     
@@ -2280,8 +2630,11 @@ app.post('/api/photos/batch-operations', authenticateToken, async (req, res) => 
         break;
         
       default:
+        logger.warn('⚠️ Invalid batch photo operation', { userId, operation });
         return res.status(400).json({ message: 'Invalid operation' });
     }
+    
+    logger.info('✅ Batch photo operations completed successfully', { userId, operation });
     
     res.json({
       success: true,
@@ -2290,7 +2643,7 @@ app.post('/api/photos/batch-operations', authenticateToken, async (req, res) => 
     });
     
   } catch (error) {
-    console.error('Batch photo operations error:', error);
+    logger.error('❌ Batch photo operations error:', error);
     res.status(500).json({ 
       message: 'Batch operation failed',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
@@ -2304,9 +2657,10 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
     const { message, itineraryId } = req.body;
     const userId = req.user.userId;
     
-    console.log('Chat request received:', { userId, message, itineraryId });
+    logger.info('💬 Chat request received', { userId, message, itineraryId });
     
     if (!message || message.trim().length === 0) {
+      logger.warn('⚠️ Chat request with empty message');
       return res.status(400).json({ 
         message: 'Message is required',
         response: 'Please enter a message to chat with me!' 
@@ -2317,12 +2671,11 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
     const user = await User.findById(userId);
     let itinerary = null;
     
-    // Handle empty itineraryId properly
     if (itineraryId && itineraryId !== 'undefined' && itineraryId !== '' && itineraryId.length === 24) {
       try {
         itinerary = await Itinerary.findById(itineraryId);
       } catch (err) {
-        console.log('Invalid itinerary ID, proceeding without itinerary context');
+        logger.debug('Invalid itinerary ID, proceeding without itinerary context');
       }
     }
     
@@ -2330,14 +2683,12 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
     let useAI = false;
     
     // Check if we should try Gemini API
-    const hasValidKey = process.env.GEMINI_API_KEY && 
-                       process.env.GEMINI_API_KEY;
-    
+    const hasValidKey = process.env.GEMINI_API_KEY && genAI;
     const withinRateLimit = rateLimiter.isAllowed(userId);
     
-    if (hasValidKey && withinRateLimit && genAI) {
+    if (hasValidKey && withinRateLimit) {
       try {
-        console.log('Attempting Gemini API call...');
+        logger.info('🤖 Attempting Gemini AI chat response');
         
         // Build context prompt
         let contextPrompt = `You are an expert travel planning assistant. Help users plan amazing trips with personalized recommendations.
@@ -2384,22 +2735,17 @@ Please provide a helpful, specific response:`;
         aiResponse = response.text();
         
         useAI = true;
-        console.log('Gemini response received successfully');
+        logger.info('✅ Gemini AI chat response received successfully');
         
       } catch (geminiError) {
-        console.error('Gemini API error:', {
-          message: geminiError.message,
-          status: geminiError.status
-        });
-        
+        logger.error('❌ Gemini API error, using mock response:', geminiError);
         aiResponse = generateIntelligentMockResponse(message, user, itinerary);
-        console.log('Using mock response due to Gemini error');
       }
     } else {
       if (!hasValidKey) {
-        console.log('No valid Gemini key, using mock response');
+        logger.warn('⚠️ No valid Gemini key, using mock response');
       } else if (!withinRateLimit) {
-        console.log('Rate limited, using mock response');
+        logger.warn('⚠️ Rate limited, using mock response');
       }
       aiResponse = generateIntelligentMockResponse(message, user, itinerary);
     }
@@ -2435,6 +2781,8 @@ Please provide a helpful, specific response:`;
     
     await chat.save();
     
+    logger.info('✅ Chat response generated and saved', { userId, useAI, provider: useAI ? 'gemini' : 'mock' });
+    
     res.json({ 
       response: aiResponse,
       aiPowered: useAI,
@@ -2442,7 +2790,7 @@ Please provide a helpful, specific response:`;
     });
     
   } catch (error) {
-    console.error('Chat service error:', error);
+    logger.error('❌ Chat service error:', error);
     res.status(500).json({ 
       message: 'Chat service error', 
       response: 'I apologize, but I am having trouble right now. Please try again in a moment.',
@@ -2454,9 +2802,12 @@ Please provide a helpful, specific response:`;
 app.get('/api/chat-history/:itineraryId?', authenticateToken, async (req, res) => {
   try {
     const { itineraryId } = req.params;
-    const query = { userId: req.user.userId };
+    const userId = req.user.userId;
     
-    // Handle empty or invalid itineraryId
+    logger.info('📜 Chat history request', { userId, itineraryId });
+    
+    const query = { userId };
+    
     if (itineraryId && itineraryId !== 'undefined' && itineraryId !== '' && itineraryId.length === 24) {
       query.itineraryId = itineraryId;
     } else {
@@ -2464,34 +2815,43 @@ app.get('/api/chat-history/:itineraryId?', authenticateToken, async (req, res) =
     }
     
     const chat = await Chat.findOne(query);
-    res.json(chat ? chat.messages : []);
+    const messages = chat ? chat.messages : [];
+    
+    logger.info('✅ Chat history retrieved', { userId, messageCount: messages.length });
+    
+    res.json(messages);
   } catch (error) {
-    console.error('Chat history error:', error);
+    logger.error('❌ Chat history error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-
+// ===== ADDITIONAL USER ROUTES =====
 app.put('/api/users/two-factor', authenticateToken, async (req, res) => {
   try {
     const { enabled } = req.body;
+    const userId = req.user.userId;
     
-    await User.findByIdAndUpdate(req.user.userId, {
+    logger.info('🔐 Two-factor authentication toggle request', { userId, enabled });
+    
+    await User.findByIdAndUpdate(userId, {
       twoFactorEnabled: !!enabled,
       updatedAt: Date.now()
     });
     
     await new UserActivity({
-      userId: req.user.userId,
+      userId,
       type: 'two_factor_toggle',
       title: `Two-factor authentication ${enabled ? 'enabled' : 'disabled'}`,
       description: `2FA has been ${enabled ? 'enabled' : 'disabled'} for this account`,
     }).save();
     
+    logger.info('✅ Two-factor authentication toggled successfully', { userId, enabled });
+    
     res.json({ success: true, twoFactorEnabled: !!enabled });
     
   } catch (error) {
-    console.error('Two-factor toggle error:', error);
+    logger.error('❌ Two-factor toggle error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -2499,6 +2859,8 @@ app.put('/api/users/two-factor', authenticateToken, async (req, res) => {
 app.delete('/api/users/delete-account', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
+    
+    logger.info('🗑️ Account deletion request', { userId });
     
     await Promise.all([
       User.findByIdAndDelete(userId),
@@ -2509,10 +2871,12 @@ app.delete('/api/users/delete-account', authenticateToken, async (req, res) => {
       EmergencyAlert.deleteMany({ userId })
     ]);
     
+    logger.info('✅ Account deleted successfully', { userId });
+    
     res.json({ success: true, message: 'Account deleted successfully' });
     
   } catch (error) {
-    console.error('Account deletion error:', error);
+    logger.error('❌ Account deletion error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -2520,9 +2884,15 @@ app.delete('/api/users/delete-account', authenticateToken, async (req, res) => {
 // ===== PROFILE PICTURE UPLOAD ROUTE =====
 app.post('/api/users/profile-picture', authenticateToken, async (req, res) => {
   try {
+    const userId = req.user.userId;
+    
+    logger.info('📷 Profile picture upload request', { userId });
+    
     // In a real implementation, you would handle file upload here
     // For now, we'll just return a success response
     // You would typically use multer or similar for file handling
+    
+    logger.warn('⚠️ Profile picture upload not implemented', { userId });
     
     res.status(501).json({ 
       message: 'Profile picture upload not implemented yet',
@@ -2530,7 +2900,7 @@ app.post('/api/users/profile-picture', authenticateToken, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Profile picture upload error:', error);
+    logger.error('❌ Profile picture upload error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -2538,6 +2908,10 @@ app.post('/api/users/profile-picture', authenticateToken, async (req, res) => {
 // ===== BULK USER STATS UPDATE ROUTE (Admin/Maintenance) =====
 app.post('/api/admin/update-user-stats', authenticateToken, async (req, res) => {
   try {
+    const userId = req.user.userId;
+    
+    logger.info('📊 Bulk user stats update request', { userId });
+    
     // This would be an admin-only route in a real implementation
     const users = await User.find({}).select('_id');
     
@@ -2545,21 +2919,24 @@ app.post('/api/admin/update-user-stats', authenticateToken, async (req, res) => 
       await updateUserStats(user._id);
     }
     
+    logger.info('✅ Bulk user stats update completed', { userId, usersUpdated: users.length });
+    
     res.json({ 
       success: true, 
       message: `Updated stats for ${users.length} users` 
     });
     
   } catch (error) {
-    console.error('Bulk user stats update error:', error);
+    logger.error('❌ Bulk user stats update error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 // ===== HEALTH CHECK =====
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  const healthStatus = {
+    status: 'OK',
+    timestamp: new Date().toISOString(),
     message: 'Travel Planner API is running',
     features: {
       ai: !!process.env.GEMINI_API_KEY,
@@ -2567,19 +2944,62 @@ app.get('/api/health', (req, res) => {
         unsplash: !!process.env.UNSPLASH_ACCESS_KEY,
         pexels: !!process.env.PEXELS_API_KEY,
         pixabay: !!process.env.PIXABAY_API_KEY
-      }
+      },
+      database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
     }
+  };
+  
+  logger.info('🏥 Health check request', healthStatus);
+  res.json(healthStatus);
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  logger.error('💥 Unhandled error:', err);
+  res.status(500).json({ 
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
   });
+});
+
+// Handle 404 routes
+app.use('*', (req, res) => {
+  logger.warn('🔍 404 - Route not found', { method: req.method, url: req.originalUrl });
+  res.status(404).json({ message: 'Route not found' });
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  logger.info('🛑 SIGTERM received, shutting down gracefully');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  logger.info('🛑 SIGINT received, shutting down gracefully');
+  process.exit(0);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  logger.error('💥 Uncaught Exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
 });
 
 // ===== START SERVER =====
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log('Photo services configured:');
-  console.log('- Unsplash:', !!process.env.UNSPLASH_ACCESS_KEY ? '✅' : '❌');
-  console.log('- Pexels:', !!process.env.PEXELS_API_KEY ? '✅' : '❌');
-  console.log('- Pixabay:', !!process.env.PIXABAY_API_KEY ? '✅' : '❌');
-  console.log('- Gemini AI:', !!process.env.GEMINI_API_KEY ? '✅' : '❌');
+  logger.info('🚀 Server started successfully', { port: PORT });
+  logger.info('📊 Service Status:', {
+    unsplash: !!process.env.UNSPLASH_ACCESS_KEY ? '✅ Configured' : '❌ Not configured',
+    pexels: !!process.env.PEXELS_API_KEY ? '✅ Configured' : '❌ Not configured',
+    pixabay: !!process.env.PIXABAY_API_KEY ? '✅ Configured' : '❌ Not configured',
+    geminiAI: !!process.env.GEMINI_API_KEY ? '✅ Configured' : '❌ Not configured',
+    mongodb: '🔄 Connecting...'
+  });
 });
 
 module.exports = app;
