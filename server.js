@@ -295,40 +295,98 @@ async function fetchPhotosForDestination(destination, activityType = null, count
   
   logger.info('📸 Fetching photos for destination', { destination, activityType, count });
   
+  if (!destination || destination.trim().length === 0) {
+    logger.warn('⚠️ Empty destination provided for photo fetch');
+    return [];
+  }
+  
   // Try all services in parallel with different queries
   const searchQueries = [
     query,
     destination,
     `${destination} travel`,
-    `${destination} tourism`
+    `${destination} tourism`,
+    `${destination} city`,
+    `${destination} landscape`
   ];
   
   const photoPromises = [];
   
-  // Add Unsplash requests
+  // Add Unsplash requests with multiple queries
   if (process.env.UNSPLASH_ACCESS_KEY) {
-    photoPromises.push(fetchUnsplashPhotos(searchQueries[0], Math.ceil(count / 3)));
-    photoPromises.push(fetchUnsplashPhotos(searchQueries[1], Math.ceil(count / 3)));
+    logger.info('📸 Adding Unsplash requests');
+    for (let i = 0; i < Math.min(3, searchQueries.length); i++) {
+      photoPromises.push(
+        fetchUnsplashPhotos(searchQueries[i], Math.ceil(count / 3))
+          .catch(error => {
+            logger.error(`❌ Unsplash fetch failed for query "${searchQueries[i]}":`, error);
+            return [];
+          })
+      );
+    }
+  } else {
+    logger.warn('⚠️ Unsplash API key not configured');
   }
   
-  // Add Pexels requests
+  // Add Pexels requests with multiple queries
   if (process.env.PEXELS_API_KEY) {
-    photoPromises.push(fetchPexelsPhotos(searchQueries[0], Math.ceil(count / 3)));
+    logger.info('📸 Adding Pexels requests');
+    for (let i = 0; i < Math.min(2, searchQueries.length); i++) {
+      photoPromises.push(
+        fetchPexelsPhotos(searchQueries[i], Math.ceil(count / 3))
+          .catch(error => {
+            logger.error(`❌ Pexels fetch failed for query "${searchQueries[i]}":`, error);
+            return [];
+          })
+      );
+    }
+  } else {
+    logger.warn('⚠️ Pexels API key not configured');
   }
   
-  // Add Pixabay requests
+  // Add Pixabay requests with multiple queries
   if (process.env.PIXABAY_API_KEY) {
-    photoPromises.push(fetchPixabayPhotos(searchQueries[0], Math.ceil(count / 3)));
+    logger.info('📸 Adding Pixabay requests');
+    for (let i = 0; i < Math.min(2, searchQueries.length); i++) {
+      photoPromises.push(
+        fetchPixabayPhotos(searchQueries[i], Math.ceil(count / 3))
+          .catch(error => {
+            logger.error(`❌ Pixabay fetch failed for query "${searchQueries[i]}":`, error);
+            return [];
+          })
+      );
+    }
+  } else {
+    logger.warn('⚠️ Pixabay API key not configured');
+  }
+  
+  if (photoPromises.length === 0) {
+    logger.error('❌ No photo services configured! Please add API keys for Unsplash, Pexels, or Pixabay');
+    return [];
   }
   
   try {
+    logger.info(`📸 Executing ${photoPromises.length} photo requests`);
     const results = await Promise.allSettled(photoPromises);
     
     // Combine all successful results
     const allPhotos = results
       .filter(result => result.status === 'fulfilled')
       .flatMap(result => result.value)
-      .filter(photo => photo && photo.url);
+      .filter(photo => photo && photo.url && photo.url.trim().length > 0);
+    
+    logger.info('📸 Photo fetch results', { 
+      totalRequests: photoPromises.length,
+      totalPhotos: allPhotos.length
+    });
+    
+    if (allPhotos.length === 0) {
+      logger.error('❌ No photos found from any service!', { 
+        destination, 
+        searchQueries: searchQueries.slice(0, 3)
+      });
+      return [];
+    }
     
     // Remove duplicates based on URL
     const uniquePhotos = allPhotos.filter((photo, index, self) =>
@@ -349,7 +407,7 @@ async function fetchPhotosForDestination(destination, activityType = null, count
     return finalPhotos;
     
   } catch (error) {
-    logger.error('❌ Error fetching photos for destination:', error);
+    logger.error('❌ Critical error fetching photos for destination:', error);
     return [];
   }
 }
@@ -358,47 +416,79 @@ async function fetchPhotosForDestination(destination, activityType = null, count
 async function getActivityPhotos(destination, activity, location) {
   logger.info('📸 Getting activity-specific photos', { destination, activity, location });
   
+  if (!destination || !activity) {
+    logger.warn('⚠️ Missing destination or activity for photo fetch');
+    return null;
+  }
+  
   try {
     // Extract activity type for better photo search
     const activityLower = activity.toLowerCase();
     let activityType = '';
     
-    if (activityLower.includes('museum') || activityLower.includes('gallery')) {
-      activityType = 'museum';
-    } else if (activityLower.includes('temple') || activityLower.includes('shrine') || activityLower.includes('church')) {
-      activityType = 'temple';
-    } else if (activityLower.includes('market') || activityLower.includes('shopping')) {
-      activityType = 'market';
-    } else if (activityLower.includes('park') || activityLower.includes('garden')) {
-      activityType = 'park';
-    } else if (activityLower.includes('restaurant') || activityLower.includes('food') || activityLower.includes('dining')) {
-      activityType = 'food';
-    } else if (activityLower.includes('beach')) {
-      activityType = 'beach';
-    } else if (activityLower.includes('mountain') || activityLower.includes('hiking')) {
-      activityType = 'mountain';
-    }
+    // Map activity types to better search terms
+    const activityMappings = {
+      'museum': ['museum', 'gallery', 'exhibit'],
+      'temple': ['temple', 'shrine', 'church', 'cathedral', 'mosque'],
+      'market': ['market', 'shopping', 'bazaar', 'souk'],
+      'park': ['park', 'garden', 'botanical', 'nature'],
+      'food': ['restaurant', 'food', 'dining', 'cafe', 'cuisine'],
+      'beach': ['beach', 'seaside', 'ocean', 'coast'],
+      'mountain': ['mountain', 'hiking', 'trek', 'climb', 'peak'],
+      'historic': ['historic', 'heritage', 'ancient', 'monument'],
+      'architecture': ['architecture', 'building', 'landmark'],
+      'art': ['art', 'gallery', 'artistic', 'creative']
+    };
     
-    // Try specific location first, then fall back to destination
-    const searchQueries = [
-      location,
-      `${destination} ${activityType}`,
-      `${destination} ${activity}`,
-      destination
-    ].filter(q => q && q.trim());
-    
-    for (const query of searchQueries) {
-      const photos = await fetchPhotosForDestination(query, null, 1);
-      if (photos.length > 0) {
-        logger.info('✅ Activity photo found', { activity, query, photoFound: true });
-        return photos[0];
+    // Find matching activity type
+    for (const [type, keywords] of Object.entries(activityMappings)) {
+      if (keywords.some(keyword => activityLower.includes(keyword))) {
+        activityType = type;
+        break;
       }
     }
     
-    logger.warn('⚠️ No activity photo found', { activity, location });
+    // Try multiple search queries in order of specificity
+    const searchQueries = [
+      location && location.trim() ? location.trim() : null,
+      activityType ? `${destination} ${activityType}` : null,
+      `${destination} ${activity}`,
+      `${destination} attraction`,
+      destination
+    ].filter(q => q && q.trim().length > 0);
+    
+    logger.info('📸 Trying search queries for activity', { 
+      activity, 
+      activityType, 
+      searchQueries: searchQueries.slice(0, 3)
+    });
+    
+    for (const query of searchQueries) {
+      try {
+        const photos = await fetchPhotosForDestination(query, null, 1);
+        if (photos.length > 0 && photos[0].url) {
+          logger.info('✅ Activity photo found', { 
+            activity, 
+            query, 
+            photoUrl: photos[0].url.substring(0, 50) + '...'
+          });
+          return photos[0];
+        }
+      } catch (error) {
+        logger.error(`❌ Error fetching photo for query "${query}":`, error);
+        continue;
+      }
+    }
+    
+    logger.warn('⚠️ No activity photo found after trying all queries', { 
+      activity, 
+      location, 
+      searchQueries: searchQueries.slice(0, 3)
+    });
     return null;
+    
   } catch (error) {
-    logger.error('❌ Error getting activity photos:', error);
+    logger.error('❌ Critical error getting activity photos:', error);
     return null;
   }
 }
@@ -840,28 +930,82 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
     return null;
   }
   
-  // Get destination photos
-  const destinationPhotos = await fetchPhotosForDestination(destination, null, 5);
+  logger.info('📸 Starting photo generation process');
+  
+  // Get destination photos with retry logic
+  let destinationPhotos = [];
+  let photoAttempts = 0;
+  const maxPhotoAttempts = 3;
+  
+  while (destinationPhotos.length === 0 && photoAttempts < maxPhotoAttempts) {
+    photoAttempts++;
+    logger.info(`📸 Attempt ${photoAttempts} to fetch destination photos`);
+    
+    try {
+      destinationPhotos = await fetchPhotosForDestination(destination, null, 5);
+      if (destinationPhotos.length > 0) {
+        logger.info('✅ Destination photos fetched successfully', { count: destinationPhotos.length });
+        break;
+      }
+    } catch (error) {
+      logger.error(`❌ Photo fetch attempt ${photoAttempts} failed:`, error);
+    }
+    
+    // Wait before retry
+    if (photoAttempts < maxPhotoAttempts) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+  
+  if (destinationPhotos.length === 0) {
+    logger.error('❌ Failed to fetch any destination photos after all attempts');
+    
+    // Create fallback photos
+    destinationPhotos = [{
+      id: 'fallback-1',
+      url: 'https://via.placeholder.com/800x600/4A90E2/FFFFFF?text=' + encodeURIComponent(destination),
+      thumb: 'https://via.placeholder.com/400x300/4A90E2/FFFFFF?text=' + encodeURIComponent(destination),
+      description: `${destination} - Travel destination`,
+      photographer: 'Placeholder',
+      source: 'fallback'
+    }];
+  }
   
   // Add photos to each day and activity
   const enhancedDays = await Promise.all(
     basicItinerary.days.map(async (day, dayIndex) => {
-      logger.debug(`📸 Adding photos to day ${dayIndex + 1}`);
+      logger.info(`📸 Processing day ${dayIndex + 1}/${basicItinerary.days.length}`);
       
       // Add photos to each activity
       const enhancedActivities = await Promise.all(
         day.activities.map(async (activity, activityIndex) => {
+          logger.info(`📸 Processing activity ${activityIndex + 1}/${day.activities.length}: ${activity.activity}`);
+          
           try {
             // Get activity-specific photo
             const activityPhoto = await getActivityPhotos(destination, activity.activity, activity.location);
             
-            return {
+            const enhancedActivity = {
               ...activity,
               photo: activityPhoto,
               fallbackPhoto: activityPhoto ? null : destinationPhotos[activityIndex % destinationPhotos.length] || null
             };
+            
+            if (activityPhoto) {
+              logger.info('✅ Activity photo added', { 
+                activity: activity.activity, 
+                photoSource: activityPhoto.source 
+              });
+            } else {
+              logger.warn('⚠️ No activity photo found, using fallback', { 
+                activity: activity.activity 
+              });
+            }
+            
+            return enhancedActivity;
+            
           } catch (error) {
-            logger.error(`❌ Error adding photo to activity ${activityIndex}:`, error);
+            logger.error(`❌ Error processing activity ${activityIndex}:`, error);
             return {
               ...activity,
               photo: null,
@@ -879,18 +1023,24 @@ async function sanitizeAIItineraryWithPhotos(aiData, destination, expectedDays, 
     })
   );
   
-  logger.info('✅ AI itinerary with photos sanitization complete', { 
-    destination, 
-    daysGenerated: enhancedDays.length,
-    destinationPhotos: destinationPhotos.length
-  });
-  
-  return {
+  const finalResult = {
     ...basicItinerary,
     days: enhancedDays,
     destinationPhotos: destinationPhotos.slice(0, 3),
     photosEnabled: true
   };
+  
+  logger.info('✅ AI itinerary with photos sanitization complete', { 
+    destination, 
+    daysGenerated: enhancedDays.length,
+    destinationPhotos: destinationPhotos.length,
+    totalActivities: enhancedDays.reduce((sum, day) => sum + day.activities.length, 0),
+    activitiesWithPhotos: enhancedDays.reduce((sum, day) => 
+      sum + day.activities.filter(act => act.photo && act.photo.url).length, 0
+    )
+  });
+  
+  return finalResult;
 }
 
 function generateHighQualityMockItinerary(destination, days, interests, budget, pace, startDateStr) {
@@ -2319,7 +2469,38 @@ app.post('/api/generate-itinerary', authenticateToken, async (req, res) => {
       includePhotos 
     });
     
+    // Validate required fields
+    if (!destination || !startDate || !endDate) {
+      logger.warn('⚠️ Missing required fields for itinerary generation');
+      return res.status(400).json({ 
+        message: 'Destination, start date, and end date are required' 
+      });
+    }
+    
     const days = Math.ceil((new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1;
+    
+    if (days < 1 || days > 30) {
+      logger.warn('⚠️ Invalid trip duration', { days });
+      return res.status(400).json({ 
+        message: 'Trip duration must be between 1 and 30 days' 
+      });
+    }
+    
+    // Check photo service availability if photos are requested
+    if (includePhotos) {
+      const photoServicesAvailable = !!(
+        process.env.UNSPLASH_ACCESS_KEY || 
+        process.env.PEXELS_API_KEY || 
+        process.env.PIXABAY_API_KEY
+      );
+      
+      if (!photoServicesAvailable) {
+        logger.warn('⚠️ Photos requested but no photo services configured');
+        return res.status(400).json({ 
+          message: 'Photos requested but no photo services are configured. Please contact administrator.' 
+        });
+      }
+    }
     
     let generatedItinerary;
     let useAI = false;
@@ -2342,16 +2523,9 @@ User preferences:
 - Dates: ${startDate} to ${endDate}
 
 IMPORTANT: Generate activities for each day but DO NOT worry about specific dates in your response. 
-Focus on creating great activities. The dates will be handled separately.
+Focus on creating great activities with detailed location names for photo matching.
 
-Create a JSON response with this EXACT structure. Follow these rules strictly:
-1. Cost must be a NUMBER (integer), never text
-2. Use 0 for free activities
-3. Times must be in HH:MM format
-4. All fields are required
-5. Generate exactly ${days} days worth of activities
-6. Make location names specific and detailed for better photo matching
-
+Create a JSON response with this EXACT structure:
 {
   "days": [
     {
@@ -2359,7 +2533,7 @@ Create a JSON response with this EXACT structure. Follow these rules strictly:
         {
           "time": "09:00",
           "activity": "Visit Senso-ji Temple",
-          "location": "Asakusa, Tokyo",
+          "location": "4-2-1 Asakusa, Taito City, Tokyo",
           "duration": "2 hours",
           "cost": 0,
           "notes": "Free admission, arrive early to avoid crowds"
@@ -2369,7 +2543,15 @@ Create a JSON response with this EXACT structure. Follow these rules strictly:
   ]
 }
 
-Generate exactly ${days} days of activities. Make costs realistic integers in USD. Make location names specific for photo search. No explanatory text, just the JSON.`;
+Rules:
+1. Cost must be a NUMBER (integer), never text
+2. Use 0 for free activities
+3. Times must be in HH:MM format
+4. Make location names specific and detailed
+5. Generate exactly ${days} days
+6. Include ${pace === 'relaxed' ? '2-3' : pace === 'active' ? '4-5' : '3-4'} activities per day
+
+Generate exactly ${days} days of activities. Make costs realistic integers in USD. No explanatory text, just JSON.`;
 
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         const result = await model.generateContent(prompt);
@@ -2475,7 +2657,12 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
       userId,
       destination,
       provider,
-      photosEnabled: includePhotos
+      photosEnabled: includePhotos,
+      photoStats: includePhotos ? {
+        destinationPhotos: generatedItinerary.destinationPhotos?.length || 0,
+        activitiesWithPhotos: generatedItinerary.days?.reduce((sum, day) => 
+          sum + day.activities.filter(act => act.photo && act.photo.url).length, 0) || 0
+      } : null
     });
     
     res.json({
@@ -2487,6 +2674,12 @@ Generate exactly ${days} days of activities. Make costs realistic integers in US
         pexels: !!process.env.PEXELS_API_KEY,
         pixabay: !!process.env.PIXABAY_API_KEY
       },
+      photoStats: includePhotos ? {
+        destinationPhotos: generatedItinerary.destinationPhotos?.length || 0,
+        activitiesWithPhotos: generatedItinerary.days?.reduce((sum, day) => 
+          sum + day.activities.filter(act => act.photo && act.photo.url).length, 0) || 0,
+        totalActivities: generatedItinerary.days?.reduce((sum, day) => sum + day.activities.length, 0) || 0
+      } : null,
       message: useAI ? 
         `AI-generated itinerary created${includePhotos ? ' with photos' : ''}!` : 
         `Custom itinerary created${includePhotos ? ' with photos' : ''}!`
